@@ -64,8 +64,17 @@ const CATEGORIES = [
   "CRIPTO",
   "DEUDAS",
   "CREDITOS",
+  "HIGIENE",
+  "PERFUMERIA",
+  "ELECTRODOMESTICOS",
+  "TELEFONO",
+  "VEHICULO",
+  "TRANSPORTE",
+  "EDUCACION",
+  "MASCOTAS",
 ];
 
+const CREDIT_PLAN_DAYS = [7, 15, 21, 28];
 export default function App() {
   const [tasaDolar, setTasaDolar] = useState("");
   const [showTasaModal, setShowTasaModal] = useState(false);
@@ -97,6 +106,19 @@ export default function App() {
   const [showDrawer, setShowDrawer] = useState(false);
   const [limitsByCategory, setLimitsByCategory] = useState({});
   const [txFilter, setTxFilter] = useState("todo");
+  const [credits, setCredits] = useState([]);
+  const [showCreateCreditModal, setShowCreateCreditModal] = useState(false);
+  const [newCredit, setNewCredit] = useState({
+    nombre: "",
+    montoTotalUsd: "",
+    inicialUsd: "",
+    cuotasCantidad: "",
+    montoCuotaUsd: "",
+    planDias: 15,
+  });
+  const [selectedCredit, setSelectedCredit] = useState(null);
+  const [creditInstallments, setCreditInstallments] = useState([]);
+  const [selectedInstallments, setSelectedInstallments] = useState({});
 
   useEffect(() => {
     (async () => {
@@ -104,10 +126,12 @@ export default function App() {
         const database = await openDatabaseAsync("expense_tracker.db");
         setDb(database);
         await initializeDB(database);
+        await loadThemeFromDB(database);
         await checkTasaDia(database);
         await loadLimits(database);
         await loadTransactions(database);
         await loadCategoryTotals(database);
+        await loadCredits(database);
         setBootstrapping(false);
       } catch (e) {
         console.error("[DB bootstrap] error", e);
@@ -145,6 +169,185 @@ export default function App() {
     } catch (e) {
       console.error("[DB ensureCategoriaColumn] error", e);
     }
+  };
+
+  const loadCredits = async (database = db) => {
+    if (!database) return;
+    try {
+      const rows = await database.getAllAsync(
+        "SELECT c.*, COALESCE(SUM(CASE WHEN i.estado = 'pagado' THEN 1 ELSE 0 END), 0) AS cuotas_pagadas, COALESCE(COUNT(i.id), 0) AS cuotas_total FROM creditos c LEFT JOIN creditos_cuotas i ON i.credit_id = c.id GROUP BY c.id ORDER BY c.fecha_creacion DESC"
+      );
+      setCredits(rows);
+    } catch (e) {
+      console.error("[DB loadCredits] error", e);
+      setCredits([]);
+    }
+  };
+
+  const loadCreditInstallments = async (creditId, database = db) => {
+    if (!database || !creditId) return;
+    try {
+      const rows = await database.getAllAsync(
+        "SELECT * FROM creditos_cuotas WHERE credit_id = ? ORDER BY numero ASC",
+        [creditId]
+      );
+      setCreditInstallments(rows);
+    } catch (e) {
+      console.error("[DB loadCreditInstallments] error", e);
+      setCreditInstallments([]);
+    }
+  };
+
+  const createCredit = async () => {
+    const nombre = (newCredit.nombre || "").trim();
+    const total = parseFloat(newCredit.montoTotalUsd);
+    const inicial = parseFloat(newCredit.inicialUsd);
+    const cuotasCant = parseInt(newCredit.cuotasCantidad, 10);
+    const montoCuota = parseFloat(newCredit.montoCuotaUsd);
+    const plan = parseInt(newCredit.planDias, 10);
+
+    if (!nombre || !Number.isFinite(total) || !Number.isFinite(inicial) || !Number.isFinite(cuotasCant) || !Number.isFinite(montoCuota) || !Number.isFinite(plan)) {
+      Alert.alert("Error", "Complete todos los campos del crédito correctamente");
+      return;
+    }
+    if (!CREDIT_PLAN_DAYS.includes(plan)) {
+      Alert.alert("Error", "El plan de pago debe ser 7, 15, 21 o 28 días");
+      return;
+    }
+    const esperado = inicial + cuotasCant * montoCuota;
+    if (Math.abs(total - esperado) > 0.01) {
+      Alert.alert("Inconsistencia", "Monto Total = Inicial + (Cantidad de cuotas × Monto por cuota)");
+      return;
+    }
+    const rate = parseFloat(tasaDolar);
+    if (!Number.isFinite(rate) || rate <= 0) {
+      Alert.alert("Error", "Debe establecer la tasa del día");
+      setShowTasaModal(true);
+      return;
+    }
+    if (!db) return;
+    try {
+      const today = formatYMD(new Date());
+      await db.withTransactionAsync(async () => {
+        await db.runAsync(
+          "INSERT INTO creditos (nombre, fecha_creacion, monto_total_usd, inicial_usd, cuotas_cantidad, monto_cuota_usd, dias_plan, estado) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          [nombre, today, total, inicial, cuotasCant, montoCuota, plan, "activo"]
+        );
+        const last = await db.getAllAsync("SELECT id FROM creditos ORDER BY id DESC LIMIT 1");
+        const creditId = last && last[0] ? last[0].id : null;
+        if (!creditId) throw new Error("No se obtuvo ID del crédito");
+        for (let i = 1; i <= cuotasCant; i++) {
+          const d = new Date();
+          d.setDate(d.getDate() + plan * i);
+          const f = formatYMD(d);
+          await db.runAsync(
+            "INSERT INTO creditos_cuotas (credit_id, numero, fecha_programada, monto_usd, estado) VALUES (?, ?, ?, ?, ?)",
+            [creditId, i, f, montoCuota, "pendiente"]
+          );
+        }
+        const montoUsd = inicial;
+        const montoVes = inicial * rate;
+        await db.runAsync(
+          "INSERT INTO transacciones (fecha, tipo, descripcion, monto_original, moneda_original, monto_usd_registro, monto_ves_registro, categoria, tasa_ves_a_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          [today, "Gasto", `Inicial crédito ${nombre}`, montoUsd, "USD", montoUsd, montoVes, "CREDITOS", rate]
+        );
+      });
+      setShowCreateCreditModal(false);
+      setNewCredit({
+        nombre: "",
+        montoTotalUsd: "",
+        inicialUsd: "",
+        cuotasCantidad: "",
+        montoCuotaUsd: "",
+        planDias: 15,
+      });
+      await loadCredits();
+      await loadTransactions();
+      await loadCategoryTotals();
+    } catch (e) {
+      console.error("[DB createCredit] error", e);
+      Alert.alert("Error", "No se pudo crear el crédito");
+    }
+  };
+
+  const toggleInstallmentSelection = (id) => {
+    setSelectedInstallments((prev) => ({ ...prev, [id]: !prev[id] }));
+  };
+
+  const paySelectedInstallments = async (payAll = false) => {
+    if (!selectedCredit) return;
+    const rate = parseFloat(tasaDolar);
+    if (!Number.isFinite(rate) || rate <= 0) {
+      Alert.alert("Error", "Debe establecer la tasa del día");
+      setShowTasaModal(true);
+      return;
+    }
+    const rows = payAll
+      ? creditInstallments.filter((r) => r.estado !== "pagado")
+      : creditInstallments.filter((r) => selectedInstallments[r.id] && r.estado !== "pagado");
+    if (rows.length === 0) {
+      Alert.alert("Atención", "No hay cuotas seleccionadas pendientes");
+      return;
+    }
+    if (!db) return;
+    try {
+      const today = formatYMD(new Date());
+      const sumUsd = rows.reduce((s, r) => s + Number(r.monto_usd || 0), 0);
+      const sumVes = sumUsd * rate;
+      const nums = rows.map((r) => `#${r.numero}`).join(", ");
+      await db.withTransactionAsync(async () => {
+        for (const r of rows) {
+          const ves = Number(r.monto_usd || 0) * rate;
+          await db.runAsync(
+            "UPDATE creditos_cuotas SET estado = 'pagado', fecha_pago = ?, tasa_ves_a_usd_pagado = ?, monto_ves_pagado = ? WHERE id = ?",
+            [today, rate, ves, r.id]
+          );
+        }
+        await db.runAsync(
+          "INSERT INTO transacciones (fecha, tipo, descripcion, monto_original, moneda_original, monto_usd_registro, monto_ves_registro, categoria, tasa_ves_a_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          [
+            today,
+            "Gasto",
+            `Pago cuotas crédito ${selectedCredit.nombre || selectedCredit.id} (${nums})`,
+            sumUsd,
+            "USD",
+            sumUsd,
+            sumVes,
+            "CREDITOS",
+            rate,
+          ]
+        );
+        const pend = await db.getAllAsync(
+          "SELECT COUNT(*) as c FROM creditos_cuotas WHERE credit_id = ? AND estado != 'pagado'",
+          [selectedCredit.id]
+        );
+        const remaining = pend && pend[0] ? Number(pend[0].c || 0) : 0;
+        if (remaining === 0) {
+          await db.runAsync("UPDATE creditos SET estado = 'pagado' WHERE id = ?", [selectedCredit.id]);
+        }
+      });
+      setSelectedInstallments({});
+      await loadCreditInstallments(selectedCredit.id);
+      await loadCredits();
+      await loadTransactions();
+      await loadCategoryTotals();
+      Alert.alert("Éxito", "Pago registrado");
+    } catch (e) {
+      console.error("[DB paySelectedInstallments] error", e);
+      Alert.alert("Error", "No se pudo registrar el pago");
+    }
+  };
+
+  const openCredit = async (credit) => {
+    setSelectedCredit(credit);
+    setSelectedInstallments({});
+    await loadCreditInstallments(credit.id);
+  };
+
+  const backToCreditsList = () => {
+    setSelectedCredit(null);
+    setCreditInstallments([]);
+    setSelectedInstallments({});
   };
 
   const buildEmptyLimits = () => {
@@ -241,6 +444,9 @@ export default function App() {
     if (activeView === "limits") {
       loadLimits(db);
     }
+    if (activeView === "credits") {
+      loadCredits(db);
+    }
   }, [activeView, db]);
 
   const ensureTasaColumn = async (database) => {
@@ -259,6 +465,40 @@ export default function App() {
     }
   };
 
+  const saveSetting = async (key, value) => {
+    if (!db) return;
+    try {
+      await db.runAsync(
+        "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [key, value]
+      );
+    } catch (e) {
+      console.error("[DB saveSetting] error", e);
+    }
+  };
+
+  const loadThemeFromDB = async (database = db) => {
+    if (!database) return;
+    try {
+      const rows = await database.getAllAsync(
+        "SELECT value FROM settings WHERE key = ?",
+        ["theme"]
+      );
+      if (rows && rows.length > 0) {
+        const val = rows[0].value;
+        setDarkMode(val === "dark");
+      }
+    } catch (e) {
+      console.error("[DB loadThemeFromDB] error", e);
+    }
+  };
+
+  const toggleTheme = async () => {
+    const next = !darkMode;
+    setDarkMode(next);
+    await saveSetting("theme", next ? "dark" : "light");
+  };
+
   const initializeDB = async (database = db) => {
     if (!database) return;
     try {
@@ -271,6 +511,18 @@ export default function App() {
         );
         await database.execAsync(
           "CREATE TABLE IF NOT EXISTS limites (id INTEGER PRIMARY KEY AUTOINCREMENT, categoria TEXT, periodo TEXT, monto_usd REAL, UNIQUE(categoria, periodo));"
+        );
+        await database.execAsync(
+          "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);"
+        );
+        await database.execAsync(
+          "CREATE TABLE IF NOT EXISTS creditos (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT, fecha_creacion TEXT, monto_total_usd REAL, inicial_usd REAL, cuotas_cantidad INTEGER, monto_cuota_usd REAL, dias_plan INTEGER, estado TEXT);"
+        );
+        await database.execAsync(
+          "CREATE TABLE IF NOT EXISTS creditos_cuotas (id INTEGER PRIMARY KEY AUTOINCREMENT, credit_id INTEGER, numero INTEGER, fecha_programada TEXT, monto_usd REAL, estado TEXT, fecha_pago TEXT, tasa_ves_a_usd_pagado REAL, monto_ves_pagado REAL, FOREIGN KEY (credit_id) REFERENCES creditos(id));"
+        );
+        await database.execAsync(
+          "CREATE INDEX IF NOT EXISTS idx_creditos_cuotas_credit ON creditos_cuotas(credit_id);"
         );
       });
       await ensureCategoriaColumn(database);
@@ -590,13 +842,13 @@ export default function App() {
   const inputTextClass = darkMode ? "text-white" : "text-gray-900";
   const placeholderColor = darkMode ? "#9CA3AF" : "#6B7280";
   const chipSelectedBgBorder = darkMode
-    ? "bg-indigo-900 border-indigo-500"
-    : "bg-blue-100 border-blue-500";
-  const chipSelectedText = darkMode ? "text-indigo-100" : "text-blue-700";
+    ? "bg-indigo-600 border-indigo-400"
+    : "bg-blue-600 border-blue-600";
+  const chipSelectedText = "text-white";
   const chipUnselectedBgBorder = darkMode
-    ? "bg-gray-800 border-gray-600"
-    : "bg-gray-100 border-gray-300";
-  const chipUnselectedText = darkMode ? "text-gray-300" : "text-gray-700";
+    ? "bg-transparent border-gray-600"
+    : "bg-transparent border-gray-300";
+  const chipUnselectedText = darkMode ? "text-gray-200" : "text-gray-700";
   const minorBtnBgClass = darkMode ? "bg-gray-700" : "bg-gray-300";
   const smallBtnBgClass = darkMode ? "bg-gray-700" : "bg-gray-100";
   const barTrackClass = darkMode ? "bg-gray-700" : "bg-gray-200";
@@ -608,7 +860,10 @@ export default function App() {
 
   // Pie chart helpers and data
   const totalGastosVES = categoryTotals.reduce((s, d) => s + d.totalVES, 0);
-  const totalGastosUSD = categoryTotals.reduce((s, d) => s + (d.totalUSD || 0), 0);
+  const totalGastosUSD = categoryTotals.reduce(
+    (s, d) => s + (d.totalUSD || 0),
+    0
+  );
   const pieColors = [
     "#ef4444",
     "#f59e0b",
@@ -690,8 +945,8 @@ export default function App() {
       `A ${rOuter} ${rOuter} 0 ${largeArc} 1 ${oEnd.x} ${oEnd.y}`,
       `L ${iEnd.x} ${iEnd.y}`,
       `A ${rInner} ${rInner} 0 ${largeArc} 0 ${iStart.x} ${iStart.y}`,
-      'Z',
-    ].join(' ');
+      "Z",
+    ].join(" ");
   };
 
   const cx = 110,
@@ -707,23 +962,32 @@ export default function App() {
   let startAngle = -Math.PI / 2; // start at top
   const pieSegments = [];
   if (totalGastosVES > 0) {
-    const chartCategories = categoryTotals.slice(0, 8).filter(r => r.totalVES > 0);
+    const chartCategories = categoryTotals
+      .slice(0, 8)
+      .filter((r) => r.totalVES > 0);
     const n = chartCategories.length;
     if (n > 0) {
       const sumTop = chartCategories.reduce((s, r) => s + r.totalVES, 0);
       const gap = baseGapRad;
       const full = Math.PI * 2;
       const available = Math.max(0, full - n * gap);
-      const baseAngles = chartCategories.map(r => (sumTop > 0 ? (r.totalVES / sumTop) * available : 0));
+      const baseAngles = chartCategories.map((r) =>
+        sumTop > 0 ? (r.totalVES / sumTop) * available : 0
+      );
       const minAngle = (Math.PI / 180) * 2; // 2° mínimo
-      let angles = baseAngles.map(a => Math.max(a, minAngle));
+      let angles = baseAngles.map((a) => Math.max(a, minAngle));
       let over = angles.reduce((s, a) => s + a, 0) - available;
       if (over > 1e-6) {
         // Reducir proporcionalmente sobre los que superan el mínimo
-        const adjustableIdx = angles.map((a, i) => (a > minAngle ? i : -1)).filter(i => i >= 0);
-        let adjustableSum = adjustableIdx.reduce((s, i) => s + (angles[i] - minAngle), 0);
+        const adjustableIdx = angles
+          .map((a, i) => (a > minAngle ? i : -1))
+          .filter((i) => i >= 0);
+        let adjustableSum = adjustableIdx.reduce(
+          (s, i) => s + (angles[i] - minAngle),
+          0
+        );
         if (adjustableSum > 0) {
-          adjustableIdx.forEach(i => {
+          adjustableIdx.forEach((i) => {
             const reducible = angles[i] - minAngle;
             const delta = over * (reducible / adjustableSum);
             angles[i] = Math.max(minAngle, angles[i] - delta);
@@ -742,7 +1006,7 @@ export default function App() {
             d: donutSegmentPath(cx, cy, radius, ringInnerR, adjStart, adjEnd),
             color: pieColors[idx % pieColors.length],
             key: `${row.categoria}-${idx}`,
-            pct: (totalGastosVES > 0 ? (row.totalVES / totalGastosVES) * 100 : 0),
+            pct: totalGastosVES > 0 ? (row.totalVES / totalGastosVES) * 100 : 0,
             label: row.categoria,
             usd: row.totalUSD,
           });
@@ -846,14 +1110,14 @@ export default function App() {
       <View className={`${headerBgClass} p-4`}>
         <View className="flex-row justify-between items-center">
           <TouchableOpacity
-            className="px-3 py-1 rounded bg-white/20"
+            className="h-10 w-10 items-center justify-center rounded-full bg-white/10 border border-white/30 shadow"
             onPress={() => setShowDrawer(true)}
           >
-            <Ionicons name="menu" size={20} color="#fff" />
+            <Ionicons name="menu" size={22} color="#fff" />
           </TouchableOpacity>
           <TouchableOpacity
-            className="px-3 py-1 rounded bg-white/20"
-            onPress={() => setDarkMode(!darkMode)}
+            className="px-3 py-1.5 rounded-full bg-white/20"
+            onPress={toggleTheme}
           >
             <View className="flex-row items-center">
               <Ionicons
@@ -877,7 +1141,7 @@ export default function App() {
           <>
             <View className="flex-row justify-center mt-2">
               <TouchableOpacity
-                className={`mx-1 px-3 py-1 rounded border ${
+                className={`mx-1 px-4 py-2 rounded-full border shadow-sm ${
                   viewMode === "week"
                     ? chipSelectedBgBorder
                     : chipUnselectedBgBorder
@@ -893,7 +1157,7 @@ export default function App() {
                 </Text>
               </TouchableOpacity>
               <TouchableOpacity
-                className={`mx-1 px-3 py-1 rounded border ${
+                className={`mx-1 px-4 py-2 rounded-full border shadow-sm ${
                   viewMode === "month"
                     ? chipSelectedBgBorder
                     : chipUnselectedBgBorder
@@ -909,7 +1173,7 @@ export default function App() {
                 </Text>
               </TouchableOpacity>
               <TouchableOpacity
-                className={`mx-1 px-3 py-1 rounded border ${
+                className={`mx-1 px-4 py-2 rounded-full border shadow-sm ${
                   viewMode === "year"
                     ? chipSelectedBgBorder
                     : chipUnselectedBgBorder
@@ -956,7 +1220,7 @@ export default function App() {
         )}
       </View>
 
-      {activeView === "home" ? (
+      {activeView === "home" && (
         <FlatList
           data={filteredTransactions}
           keyExtractor={(item, index) =>
@@ -980,20 +1244,62 @@ export default function App() {
                     <>
                       <View className="items-center mb-3">
                         <View style={{ width: 220, height: 220 }}>
-                          <Svg width={220} height={220} style={{ position: 'absolute', left: 0, top: 0 }}>
+                          <Svg
+                            width={220}
+                            height={220}
+                            style={{ position: "absolute", left: 0, top: 0 }}
+                          >
                             <G>
-                              <Circle cx={cx} cy={cy} r={radius} stroke={donutTrackColor} strokeWidth={donutThickness} fill="none" />
+                              <Circle
+                                cx={cx}
+                                cy={cy}
+                                r={radius}
+                                stroke={donutTrackColor}
+                                strokeWidth={donutThickness}
+                                fill="none"
+                              />
                               {pieSegments.map((seg) => (
-                                <Path key={seg.key} d={seg.d} fill={seg.color} />
+                                <Path
+                                  key={seg.key}
+                                  d={seg.d}
+                                  fill={seg.color}
+                                />
                               ))}
-                              <Circle cx={cx} cy={cy} r={centerR} fill={donutCenterFill} />
+                              <Circle
+                                cx={cx}
+                                cy={cy}
+                                r={centerR}
+                                fill={donutCenterFill}
+                              />
                             </G>
                           </Svg>
-                          <View style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}>
-                            <Text style={{ color: darkMode ? '#ffffff' : '#111827', fontSize: 18, fontWeight: '700' }}>
+                          <View
+                            style={{
+                              position: "absolute",
+                              left: 0,
+                              top: 0,
+                              right: 0,
+                              bottom: 0,
+                              alignItems: "center",
+                              justifyContent: "center",
+                            }}
+                          >
+                            <Text
+                              style={{
+                                color: darkMode ? "#ffffff" : "#111827",
+                                fontSize: 18,
+                                fontWeight: "700",
+                              }}
+                            >
                               $ {Number(totalGastosUSD || 0).toFixed(2)}
                             </Text>
-                            <Text style={{ color: darkMode ? '#ffffff' : '#111827', fontSize: 12, marginTop: 2 }}>
+                            <Text
+                              style={{
+                                color: darkMode ? "#ffffff" : "#111827",
+                                fontSize: 12,
+                                marginTop: 2,
+                              }}
+                            >
                               Bs. {Number(totalGastosVES || 0).toFixed(2)}
                             </Text>
                           </View>
@@ -1017,7 +1323,8 @@ export default function App() {
                               {seg.label}
                             </Text>
                             <Text className={`ml-auto ${textMuted}`}>
-                              $ {Number(seg.usd || 0).toFixed(2)} • {seg.pct.toFixed(0)}%
+                              $ {Number(seg.usd || 0).toFixed(2)} •{" "}
+                              {seg.pct.toFixed(0)}%
                             </Text>
                           </View>
                         ))}
@@ -1146,7 +1453,8 @@ export default function App() {
                     </View>
                   </TouchableOpacity>
                   <TouchableOpacity
-                    className={`${accentBtnClass} px-4 py-2 rounded`}
+                    className={`${accentBtnClass} px-4 py-2.5 rounded-full shadow-md`}
+                    style={{ elevation: 2 }}
                     onPress={() => setShowAddModal(true)}
                   >
                     <View className="flex-row items-center">
@@ -1170,14 +1478,14 @@ export default function App() {
           renderItem={({ item }) => (
             <View className={`px-4`}>
               <View
-                className={`p-3 mb-2 rounded-lg shadow ${cardBgClass}`}
+                className={`p-3 mb-2 rounded-lg shadow overflow-hidden ${cardBgClass}`}
                 style={{
                   borderLeftWidth: 4,
                   borderLeftColor: getCategoryColor(item.categoria, item.tipo),
                 }}
               >
                 <View className="flex-row justify-between">
-                  <View>
+                  <View className="flex-1 pr-2">
                     <View className="flex-row items-center">
                       <Ionicons
                         name={getCategoryIcon(item.categoria, item.tipo)}
@@ -1199,19 +1507,19 @@ export default function App() {
                         (item.tipo === "Ingreso" ? "INGRESO" : "SIN CATEGORIA")}
                     </Text>
                   </View>
-                  <View className="items-end">
+                  <View className="items-end" style={{ width: "40%" }}>
                     <Text
-                      className={
+                      className={`text-right ${
                         item.tipo === "Ingreso"
                           ? "text-green-600"
                           : "text-red-600"
-                      }
+                      }`}
                     >
                       {item.tipo === "Ingreso" ? "+" : "-"}{" "}
                       {item.moneda_original === "USD" ? "$" : "Bs."}{" "}
                       {parseFloat(item.monto_original).toFixed(2)}
                     </Text>
-                    <Text className="text-gray-500 text-xs">
+                    <Text className="text-gray-500 text-xs text-right">
                       {item.moneda_original === "USD"
                         ? `Bs. ${parseFloat(item.monto_ves_registro).toFixed(
                             2
@@ -1219,7 +1527,7 @@ export default function App() {
                         : `$ ${parseFloat(item.monto_usd_registro).toFixed(2)}`}
                     </Text>
                     {item.tasa_ves_a_usd != null && (
-                      <Text className="text-gray-500 text-xs">
+                      <Text className="text-gray-500 text-xs text-right">
                         Tasa: Bs. {parseFloat(item.tasa_ves_a_usd).toFixed(2)} /
                         $1
                       </Text>
@@ -1230,7 +1538,8 @@ export default function App() {
             </View>
           )}
         />
-      ) : (
+      )}
+      {activeView === "limits" && (
         <ScrollView contentContainerStyle={{ paddingBottom: 32 }}>
           <View className="p-4">
             <Text className={`text-lg font-bold mb-2 ${textPrimary}`}>
@@ -1329,9 +1638,108 @@ export default function App() {
                 className={`${accentBtnClass} px-4 py-2 rounded`}
                 onPress={saveLimits}
               >
-                <Text className="text-white">Guardar Límites</Text>
+                <View className="flex-row items-center">
+                  <Ionicons name="save" size={18} color="#fff" />
+                  <Text className="text-white" style={{ marginLeft: 6 }}>Guardar Límites</Text>
+                </View>
               </TouchableOpacity>
             </View>
+          </View>
+        </ScrollView>
+      )}
+      {activeView === "credits" && (
+        <ScrollView contentContainerStyle={{ paddingBottom: 32 }}>
+          <View className="p-4">
+            {!selectedCredit ? (
+              <>
+                <View className="flex-row justify-between items-center mb-2">
+                  <Text className={`text-lg font-bold ${textPrimary}`}>Créditos</Text>
+                  <TouchableOpacity
+                    className={`${accentBtnClass} px-4 py-2 rounded`}
+                    onPress={() => setShowCreateCreditModal(true)}
+                  >
+                    <View className="flex-row items-center">
+                      <Ionicons name="add" size={18} color="#fff" />
+                      <Text className="text-white" style={{ marginLeft: 6 }}>Nuevo</Text>
+                    </View>
+                  </TouchableOpacity>
+                </View>
+                {credits.length === 0 ? (
+                  <Text className={textMuted}>No hay créditos</Text>
+                ) : (
+                  credits.map((c) => (
+                    <TouchableOpacity
+                      key={c.id}
+                      className={`p-3 mb-2 rounded-lg shadow ${cardBgClass}`}
+                      onPress={() => openCredit(c)}
+                    >
+                      <View className="flex-row items-center">
+                        <Ionicons name="card" size={18} color={darkMode ? "#93c5fd" : "#2563eb"} />
+                        <Text className={`ml-2 font-medium ${textPrimary}`}>{c.nombre}</Text>
+                        <Text className={`ml-auto ${textMuted}`}>{c.cuotas_pagadas}/{c.cuotas_total}</Text>
+                      </View>
+                      <View className="flex-row justify-between mt-1">
+                        <Text className={`${textMuted} text-xs`}>Creado: {formatearFecha(c.fecha_creacion)}</Text>
+                        <Text className={`text-xs ${c.estado === 'pagado' ? 'text-green-600' : textMuted}`}>{c.estado || 'activo'}</Text>
+                      </View>
+                    </TouchableOpacity>
+                  ))
+                )}
+              </>
+            ) : (
+              <>
+                <View className="flex-row justify-between items-center mb-2">
+                  <TouchableOpacity className={`${smallBtnBgClass} px-3 py-2 rounded`} onPress={backToCreditsList}>
+                    <View className="flex-row items-center">
+                      <Ionicons name="arrow-back" size={16} color={darkMode ? '#fff' : '#111827'} />
+                      <Text className={textPrimary} style={{ marginLeft: 6 }}>Volver</Text>
+                    </View>
+                  </TouchableOpacity>
+                  <Text className={`text-lg font-bold ${textPrimary}`}>{selectedCredit.nombre}</Text>
+                  <View style={{ width: 80 }} />
+                </View>
+                <View className={`p-3 mb-2 rounded-lg shadow ${cardBgClass}`}>
+                  <View className="flex-row justify-between">
+                    <Text className={textPrimary}>Cuotas</Text>
+                    <Text className={textMuted}>{creditInstallments.filter(i=>i.estado==='pagado').length}/{creditInstallments.length}</Text>
+                  </View>
+                </View>
+                {creditInstallments.map((i) => (
+                  <View key={i.id} className={`p-3 mb-2 rounded-lg shadow ${cardBgClass}`}>
+                    <View className="flex-row items-center justify-between">
+                      <View className="flex-row items-center">
+                        {i.estado === 'pagado' ? (
+                          <Ionicons name="checkbox" size={18} color={darkMode ? '#34d399' : '#059669'} />
+                        ) : (
+                          <TouchableOpacity onPress={() => toggleInstallmentSelection(i.id)}>
+                            <Ionicons name={selectedInstallments[i.id] ? 'checkbox' : 'square-outline'} size={18} color={darkMode ? '#fff' : '#111827'} />
+                          </TouchableOpacity>
+                        )}
+                        <Text className={`ml-2 ${textPrimary}`}>Cuota #{i.numero}</Text>
+                      </View>
+                      <View className="items-end">
+                        <Text className={textPrimary}>$ {Number(i.monto_usd || 0).toFixed(2)}</Text>
+                        <Text className={`${textMuted} text-xs`}>{i.estado === 'pagado' ? 'Pagada' : `Vence: ${formatearFecha(i.fecha_programada)}`}</Text>
+                      </View>
+                    </View>
+                  </View>
+                ))}
+                <View className="flex-row justify-between mt-2">
+                  <TouchableOpacity className={`${smallBtnBgClass} px-4 py-2 rounded`} onPress={() => paySelectedInstallments(false)}>
+                    <View className="flex-row items-center">
+                      <Ionicons name="cash" size={16} color={darkMode ? '#fff' : '#111827'} />
+                      <Text className={textPrimary} style={{ marginLeft: 6 }}>Pagar seleccionadas</Text>
+                    </View>
+                  </TouchableOpacity>
+                  <TouchableOpacity className={`${accentBtnClass} px-4 py-2 rounded`} onPress={() => paySelectedInstallments(true)}>
+                    <View className="flex-row items-center">
+                      <Ionicons name="checkmark-done" size={18} color="#fff" />
+                      <Text className="text-white" style={{ marginLeft: 6 }}>Pagar todas</Text>
+                    </View>
+                  </TouchableOpacity>
+                </View>
+              </>
+            )}
           </View>
         </ScrollView>
       )}
@@ -1362,6 +1770,99 @@ export default function App() {
           </View>
         </View>
       </Modal>
+
+      <Modal visible={showCreateCreditModal} animationType="slide" transparent>
+        <View className="flex-1 justify-center items-center bg-black/50">
+          <View className={`${modalBgClass} p-6 rounded-lg w-4/5`}>
+            <Text className={`text-lg font-bold mb-4 ${textPrimary}`}>Nuevo Crédito</Text>
+            <ScrollView style={{ maxHeight: 420 }}>
+              <Text className={`${textMuted} mb-1`}>Nombre</Text>
+              <TextInput
+                className={`border rounded p-2 mb-3 ${inputBgClass} ${inputBorderClass} ${inputTextClass}`}
+                placeholder="Identificador"
+                placeholderTextColor={placeholderColor}
+                value={newCredit.nombre}
+                onChangeText={(t) => setNewCredit((p) => ({ ...p, nombre: t }))}
+              />
+
+              <Text className={`${textMuted} mb-1`}>Monto Total ($)</Text>
+              <TextInput
+                className={`border rounded p-2 mb-3 ${inputBgClass} ${inputBorderClass} ${inputTextClass}`}
+                placeholder="0.00"
+                placeholderTextColor={placeholderColor}
+                keyboardType="numeric"
+                value={newCredit.montoTotalUsd}
+                onChangeText={(t) => setNewCredit((p) => ({ ...p, montoTotalUsd: t }))}
+              />
+
+              <Text className={`${textMuted} mb-1`}>Inicial ($)</Text>
+              <TextInput
+                className={`border rounded p-2 mb-3 ${inputBgClass} ${inputBorderClass} ${inputTextClass}`}
+                placeholder="0.00"
+                placeholderTextColor={placeholderColor}
+                keyboardType="numeric"
+                value={newCredit.inicialUsd}
+                onChangeText={(t) => setNewCredit((p) => ({ ...p, inicialUsd: t }))}
+              />
+
+              <View className="flex-row -mx-1">
+                <View className="w-1/2 px-1">
+                  <Text className={`${textMuted} mb-1`}>Cantidad de cuotas</Text>
+                  <TextInput
+                    className={`border rounded p-2 mb-3 ${inputBgClass} ${inputBorderClass} ${inputTextClass}`}
+                    placeholder="0"
+                    placeholderTextColor={placeholderColor}
+                    keyboardType="numeric"
+                    value={newCredit.cuotasCantidad}
+                    onChangeText={(t) => setNewCredit((p) => ({ ...p, cuotasCantidad: t }))}
+                  />
+                </View>
+                <View className="w-1/2 px-1">
+                  <Text className={`${textMuted} mb-1`}>Monto por cuota ($)</Text>
+                  <TextInput
+                    className={`border rounded p-2 mb-3 ${inputBgClass} ${inputBorderClass} ${inputTextClass}`}
+                    placeholder="0.00"
+                    placeholderTextColor={placeholderColor}
+                    keyboardType="numeric"
+                    value={newCredit.montoCuotaUsd}
+                    onChangeText={(t) => setNewCredit((p) => ({ ...p, montoCuotaUsd: t }))}
+                  />
+                </View>
+              </View>
+
+              <Text className={`${textMuted} mb-1`}>Plan de pago (días)</Text>
+              <View className="flex-row -mx-1 mb-2">
+                {[7, 15, 21, 28].map((d) => (
+                  <View key={d} className="w-1/4 px-1">
+                    <TouchableOpacity
+                      className={`p-2 rounded border items-center ${
+                        Number(newCredit.planDias) === d ? chipSelectedBgBorder : chipUnselectedBgBorder
+                      }`}
+                      onPress={() => setNewCredit((p) => ({ ...p, planDias: d }))}
+                    >
+                      <Text className={Number(newCredit.planDias) === d ? chipSelectedText : chipUnselectedText}>{d}</Text>
+                    </TouchableOpacity>
+                  </View>
+                ))}
+              </View>
+            </ScrollView>
+            <View className="flex-row justify-between mt-3">
+              <TouchableOpacity className={`${smallBtnBgClass} px-4 py-2 rounded`} onPress={() => setShowCreateCreditModal(false)}>
+                <View className="flex-row items-center">
+                  <Ionicons name="close" size={16} color={darkMode ? '#fff' : '#111827'} />
+                  <Text className={textPrimary} style={{ marginLeft: 6 }}>Cancelar</Text>
+                </View>
+              </TouchableOpacity>
+              <TouchableOpacity className={`${accentBtnClass} px-4 py-2 rounded`} onPress={createCredit}>
+                <View className="flex-row items-center">
+                  <Ionicons name="save" size={18} color="#fff" />
+                  <Text className="text-white" style={{ marginLeft: 6 }}>Crear crédito</Text>
+                </View>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
       <Modal visible={showDrawer} animationType="fade" transparent>
         <View className="flex-1 flex-row">
           <View className={`${modalBgClass} w-64 h-full p-6`}>
@@ -1377,11 +1878,12 @@ export default function App() {
                 setShowDrawer(false);
               }}
             >
-              <Text
-                className={activeView === "home" ? "text-white" : textPrimary}
-              >
-                Home
-              </Text>
+              <View className="flex-row items-center">
+                <Ionicons name="home" size={18} color={activeView === "home" ? '#fff' : (darkMode ? '#fff' : '#111827')} />
+                <Text className={activeView === "home" ? "text-white" : textPrimary} style={{ marginLeft: 8 }}>
+                  Home
+                </Text>
+              </View>
             </TouchableOpacity>
             <TouchableOpacity
               className={`mb-2 p-3 rounded ${
@@ -1392,11 +1894,28 @@ export default function App() {
                 setShowDrawer(false);
               }}
             >
-              <Text
-                className={activeView === "limits" ? "text-white" : textPrimary}
-              >
-                Límites
-              </Text>
+              <View className="flex-row items-center">
+                <Ionicons name="speedometer" size={18} color={activeView === "limits" ? '#fff' : (darkMode ? '#fff' : '#111827')} />
+                <Text className={activeView === "limits" ? "text-white" : textPrimary} style={{ marginLeft: 8 }}>
+                  Límites
+                </Text>
+              </View>
+            </TouchableOpacity>
+            <TouchableOpacity
+              className={`mb-2 p-3 rounded ${
+                activeView === "credits" ? accentBtnClass : smallBtnBgClass
+              }`}
+              onPress={() => {
+                setActiveView("credits");
+                setShowDrawer(false);
+              }}
+            >
+              <View className="flex-row items-center">
+                <Ionicons name="card" size={18} color={activeView === "credits" ? '#fff' : (darkMode ? '#fff' : '#111827')} />
+                <Text className={activeView === "credits" ? "text-white" : textPrimary} style={{ marginLeft: 8 }}>
+                  Créditos
+                </Text>
+              </View>
             </TouchableOpacity>
           </View>
           <TouchableOpacity
@@ -1550,7 +2069,6 @@ export default function App() {
           </View>
         </View>
       </Modal>
-      {/* Selector de Mes */}
       <Modal visible={showMonthModal} animationType="slide" transparent>
         <View className="flex-1 justify-center items-center bg-black/50">
           <View className={`${modalBgClass} p-6 rounded-lg w-11/12`}>
