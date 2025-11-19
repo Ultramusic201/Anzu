@@ -110,6 +110,7 @@ const CATEGORIES = [
   "TRANSPORTE",
   "EDUCACION",
   "MASCOTAS",
+  "CASA",
 ];
 
 const CREDIT_PLAN_DAYS = [7, 15, 21, 28];
@@ -210,7 +211,8 @@ export default function App() {
       .map((t) => {
         if (!t || !t.fecha) return null;
         const parts = t.fecha.split("-").map((n) => parseInt(n, 10));
-        if (parts.length !== 3 || parts.some((n) => Number.isNaN(n))) return null;
+        if (parts.length !== 3 || parts.some((n) => Number.isNaN(n)))
+          return null;
         const [year, month, day] = parts;
         const date = new Date(year, month - 1, day);
         if (Number.isNaN(date.getTime())) return null;
@@ -219,7 +221,8 @@ export default function App() {
         return {
           ...t,
           categoria:
-            t.categoria ?? (t.tipo === "Ingreso" ? "INGRESOS" : "SIN CATEGORIA"),
+            t.categoria ??
+            (t.tipo === "Ingreso" ? "INGRESOS" : "SIN CATEGORIA"),
           date,
           amountUsd: Number.isFinite(amountUsd) ? amountUsd : 0,
           amountVes: Number.isFinite(amountVes) ? amountVes : 0,
@@ -321,8 +324,15 @@ export default function App() {
       for (let i = 0; i < 12; i += 1) {
         const current = new Date(start.getFullYear(), start.getMonth() + i, 1);
         const key = formatYM(current);
-        const entry = chartBaseData.monthly.get(key) || { gastos: 0, ingresos: 0 };
-        labels.push(`${MONTHS_SHORT[current.getMonth()]} '${String(current.getFullYear()).slice(-2)}`);
+        const entry = chartBaseData.monthly.get(key) || {
+          gastos: 0,
+          ingresos: 0,
+        };
+        labels.push(
+          `${MONTHS_SHORT[current.getMonth()]} '${String(
+            current.getFullYear()
+          ).slice(-2)}`
+        );
         gastos.push(entry.gastos);
         ingresos.push(entry.ingresos);
       }
@@ -335,8 +345,13 @@ export default function App() {
           now.getDate() - i
         );
         const key = formatYMD(current);
-        const entry = chartBaseData.daily.get(key) || { gastos: 0, ingresos: 0 };
-        labels.push(`${pad2(current.getDate())}/${pad2(current.getMonth() + 1)}`);
+        const entry = chartBaseData.daily.get(key) || {
+          gastos: 0,
+          ingresos: 0,
+        };
+        labels.push(
+          `${pad2(current.getDate())}/${pad2(current.getMonth() + 1)}`
+        );
         gastos.push(entry.gastos);
         ingresos.push(entry.ingresos);
       }
@@ -459,18 +474,15 @@ export default function App() {
     lineLabels.length > 1 ? chartWidth / (lineLabels.length - 1) : chartWidth;
   const lineTopPadding = 16;
   const lineBottomPadding = 20;
-  const lineDrawableHeight = lineChartHeight - lineTopPadding - lineBottomPadding;
+  const lineDrawableHeight =
+    lineChartHeight - lineTopPadding - lineBottomPadding;
   const gastosLinePoints = lineLabels.length
     ? lineChartData.gastos
         .map((value, index) => {
-          const x =
-            lineLabels.length > 1
-              ? lineStep * index
-              : chartWidth / 2;
+          const x = lineLabels.length > 1 ? lineStep * index : chartWidth / 2;
           const y =
             lineTopPadding +
-            (lineDrawableHeight -
-              (value / lineMaxValue) * lineDrawableHeight);
+            (lineDrawableHeight - (value / lineMaxValue) * lineDrawableHeight);
           return `${x},${y}`;
         })
         .join(" ")
@@ -478,14 +490,10 @@ export default function App() {
   const ingresosLinePoints = lineLabels.length
     ? lineChartData.ingresos
         .map((value, index) => {
-          const x =
-            lineLabels.length > 1
-              ? lineStep * index
-              : chartWidth / 2;
+          const x = lineLabels.length > 1 ? lineStep * index : chartWidth / 2;
           const y =
             lineTopPadding +
-            (lineDrawableHeight -
-              (value / lineMaxValue) * lineDrawableHeight);
+            (lineDrawableHeight - (value / lineMaxValue) * lineDrawableHeight);
           return `${x},${y}`;
         })
         .join(" ")
@@ -608,11 +616,12 @@ export default function App() {
             const base64 = await FileSystem.readAsStringAsync(sourcePath, {
               encoding: FileSystem.EncodingType.Base64,
             });
-            const fileUri = await FileSystem.StorageAccessFramework.createFileAsync(
-              permissions.directoryUri,
-              filename,
-              "application/octet-stream"
-            );
+            const fileUri =
+              await FileSystem.StorageAccessFramework.createFileAsync(
+                permissions.directoryUri,
+                filename,
+                "application/octet-stream"
+              );
             await FileSystem.writeAsStringAsync(fileUri, base64, {
               encoding: FileSystem.EncodingType.Base64,
             });
@@ -1310,19 +1319,27 @@ export default function App() {
     try {
       setIsFetchingOfficialRate(true);
       setOfficialRateError(null);
-      const response = await fetch("https://ve.dolarapi.com/v1/dolares/oficial");
+      const response = await fetch(
+        "https://ve.dolarapi.com/v1/dolares/oficial"
+      );
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }
       const data = await response.json();
       const promedio = data?.promedio;
-      if (typeof promedio !== "number" || Number.isNaN(promedio) || promedio <= 0) {
+      if (
+        typeof promedio !== "number" ||
+        Number.isNaN(promedio) ||
+        promedio <= 0
+      ) {
         throw new Error("Invalid promedio value");
       }
       setTasaDolar(String(promedio));
     } catch (error) {
       console.error("[Tasa fetchOfficialRate]", error);
-      setOfficialRateError("No se pudo obtener la tasa oficial. Ingrésala manualmente.");
+      setOfficialRateError(
+        "No se pudo obtener la tasa oficial. Ingrésala manualmente."
+      );
     } finally {
       setIsFetchingOfficialRate(false);
     }
@@ -1435,7 +1452,7 @@ export default function App() {
 
       const query = `SELECT * FROM transacciones WHERE ${conditions.join(
         " AND "
-      )} ORDER BY fecha DESC`;
+      )} ORDER BY id DESC`;
 
       const rows = await database.getAllAsync(query, params);
       setTransactions(rows);
@@ -1443,7 +1460,7 @@ export default function App() {
       console.error("[DB loadTransactions] error", e);
       try {
         const rows = await database.getAllAsync(
-          "SELECT * FROM transacciones ORDER BY fecha DESC LIMIT 200"
+          "SELECT * FROM transacciones ORDER BY id DESC LIMIT 200"
         );
         setTransactions(rows);
       } catch (e2) {
@@ -1469,18 +1486,12 @@ export default function App() {
     const parsedEnd = parseSearchDate(searchEndDate);
 
     if (searchStartDate && !parsedStart) {
-      Alert.alert(
-        "Fecha inicial inválida",
-        "Usa el formato DD/MM/AAAA."
-      );
+      Alert.alert("Fecha inicial inválida", "Usa el formato DD/MM/AAAA.");
       return;
     }
 
     if (searchEndDate && !parsedEnd) {
-      Alert.alert(
-        "Fecha final inválida",
-        "Usa el formato DD/MM/AAAA."
-      );
+      Alert.alert("Fecha final inválida", "Usa el formato DD/MM/AAAA.");
       return;
     }
 
@@ -1658,23 +1669,55 @@ export default function App() {
     let ingresosUSD = 0;
     let gastosUSD = 0;
 
+    let netoOriginalUSD = 0;
+    let netoOriginalVES = 0;
+
     transactions.forEach((trans) => {
       if (trans.tipo === "Ingreso") {
-        ingresosVES += trans.monto_ves_registro;
-        ingresosUSD += trans.monto_usd_registro;
+        ingresosVES += Number(trans.monto_ves_registro || 0);
+        ingresosUSD += Number(trans.monto_usd_registro || 0);
       } else {
-        gastosVES += trans.monto_ves_registro;
-        gastosUSD += trans.monto_usd_registro;
+        gastosVES += Number(trans.monto_ves_registro || 0);
+        gastosUSD += Number(trans.monto_usd_registro || 0);
       }
+
+      const esIngreso = trans.tipo === "Ingreso";
+      const montoOriginal = Number(trans.monto_original);
+      const monedaOriginal = trans.moneda_original;
+      let originalUSD = 0;
+      let originalVES = 0;
+      if (monedaOriginal === "USD" && Number.isFinite(montoOriginal)) {
+        originalUSD = montoOriginal;
+      } else if (monedaOriginal === "VES" && Number.isFinite(montoOriginal)) {
+        originalVES = montoOriginal;
+      } else {
+        const usdReg = Number(trans.monto_usd_registro);
+        const vesReg = Number(trans.monto_ves_registro);
+        if (Number.isFinite(usdReg) && usdReg !== 0) originalUSD = usdReg;
+        else if (Number.isFinite(vesReg) && vesReg !== 0) originalVES = vesReg;
+      }
+      netoOriginalUSD += esIngreso ? originalUSD : -originalUSD;
+      netoOriginalVES += esIngreso ? originalVES : -originalVES;
     });
+
+    const rate = parseFloat(tasaDolar);
+    let balanceUSDHoy;
+    let balanceVESHoy;
+    if (Number.isFinite(rate) && rate > 0) {
+      balanceUSDHoy = netoOriginalUSD + netoOriginalVES / rate;
+      balanceVESHoy = netoOriginalVES + netoOriginalUSD * rate;
+    } else {
+      balanceUSDHoy = ingresosUSD - gastosUSD;
+      balanceVESHoy = ingresosVES - gastosVES;
+    }
 
     return {
       ingresosVES: ingresosVES.toFixed(2),
       gastosVES: gastosVES.toFixed(2),
-      balanceVES: (ingresosVES - gastosVES).toFixed(2),
+      balanceVES: balanceVESHoy.toFixed(2),
       ingresosUSD: ingresosUSD.toFixed(2),
       gastosUSD: gastosUSD.toFixed(2),
-      balanceUSD: (ingresosUSD - gastosUSD).toFixed(2),
+      balanceUSD: balanceUSDHoy.toFixed(2),
     };
   };
 
@@ -1748,6 +1791,7 @@ export default function App() {
     TRANSPORTE: "#2dd4bf",
     EDUCACION: "#60a5fa",
     MASCOTAS: "#a78bfa",
+    CASA: "#b45309",
     "SIN CATEGORIA": "#9ca3af",
     INGRESO: "#16a34a",
   };
@@ -1772,6 +1816,7 @@ export default function App() {
     TRANSPORTE: "bus",
     EDUCACION: "school",
     MASCOTAS: "paw",
+    CASA: "home",
     "SIN CATEGORIA": "pricetag",
     INGRESO: "trending-up",
   };
@@ -2178,8 +2223,8 @@ export default function App() {
                             <Text className={`ml-auto ${textMuted}`}>
                               {displayCurrency === "USD"
                                 ? `$ ${Number(seg.usd || 0).toFixed(2)}`
-                                : `Bs. ${Number(seg.ves || 0).toFixed(2)}`}
-                              {" "}• {seg.pct.toFixed(0)}%
+                                : `Bs. ${Number(seg.ves || 0).toFixed(2)}`}{" "}
+                              • {seg.pct.toFixed(0)}%
                             </Text>
                           </View>
                         ))}
@@ -2233,18 +2278,21 @@ export default function App() {
                     <View className="items-end">
                       <Text
                         className={
-                          parseFloat(
-                            displayCurrency === "USD"
-                              ? totales.balanceUSD
-                              : totales.balanceVES
-                          ) >= 0
+                          parseFloat(totales.balanceUSD) >= 0
                             ? "text-green-600"
                             : "text-red-600"
                         }
                       >
-                        {displayCurrency === "USD"
-                          ? `$ ${totales.balanceUSD}`
-                          : `Bs. ${totales.balanceVES}`}
+                        {`$ ${totales.balanceUSD}`}
+                      </Text>
+                      <Text
+                        className={
+                          parseFloat(totales.balanceVES) >= 0
+                            ? "text-green-600"
+                            : "text-red-600"
+                        }
+                      >
+                        {`Bs. ${totales.balanceVES}`}
                       </Text>
                     </View>
                   </View>
@@ -2407,22 +2455,22 @@ export default function App() {
         <ScrollView contentContainerStyle={{ paddingBottom: 32 }}>
           <View className="p-4">
             <LineEvolutionChart
-                lineChartData={lineChartData}
-                chartPeriod={chartPeriod}
-                setChartPeriod={setChartPeriod}
-                selectedLineIndex={selectedLineIndex}
-                setSelectedLineIndex={setSelectedLineIndex}
-                darkMode={darkMode}
-                textPrimary={textPrimary}
-                textMuted={textMuted}
-                borderMutedClass={borderMutedClass}
-                cardBgClass={cardBgClass}
-                formatUsd={formatUsd}
-                COLOR_GASTOS={COLOR_GASTOS}
-                COLOR_GASTOS_ALT={COLOR_GASTOS_ALT}
-                COLOR_INGRESOS={COLOR_INGRESOS}
-                COLOR_INGRESOS_ALT={COLOR_INGRESOS_ALT}
-              />
+              lineChartData={lineChartData}
+              chartPeriod={chartPeriod}
+              setChartPeriod={setChartPeriod}
+              selectedLineIndex={selectedLineIndex}
+              setSelectedLineIndex={setSelectedLineIndex}
+              darkMode={darkMode}
+              textPrimary={textPrimary}
+              textMuted={textMuted}
+              borderMutedClass={borderMutedClass}
+              cardBgClass={cardBgClass}
+              formatUsd={formatUsd}
+              COLOR_GASTOS={COLOR_GASTOS}
+              COLOR_GASTOS_ALT={COLOR_GASTOS_ALT}
+              COLOR_INGRESOS={COLOR_INGRESOS}
+              COLOR_INGRESOS_ALT={COLOR_INGRESOS_ALT}
+            />
 
             <CategoryTopList
               categoryChartData={categoryChartData}
@@ -2611,7 +2659,9 @@ export default function App() {
             <View className="flex-row justify-center mb-3">
               <TouchableOpacity
                 className={`mx-1 px-4 py-2 rounded-full border shadow-sm ${
-                  viewMode === "week" ? chipSelectedBgBorder : chipUnselectedBgBorder
+                  viewMode === "week"
+                    ? chipSelectedBgBorder
+                    : chipUnselectedBgBorder
                 }`}
                 onPress={() => setViewMode("week")}
               >
@@ -2625,7 +2675,9 @@ export default function App() {
               </TouchableOpacity>
               <TouchableOpacity
                 className={`mx-1 px-4 py-2 rounded-full border shadow-sm ${
-                  viewMode === "month" ? chipSelectedBgBorder : chipUnselectedBgBorder
+                  viewMode === "month"
+                    ? chipSelectedBgBorder
+                    : chipUnselectedBgBorder
                 }`}
                 onPress={() => setViewMode("month")}
               >
@@ -2639,7 +2691,9 @@ export default function App() {
               </TouchableOpacity>
               <TouchableOpacity
                 className={`mx-1 px-4 py-2 rounded-full border shadow-sm ${
-                  viewMode === "year" ? chipSelectedBgBorder : chipUnselectedBgBorder
+                  viewMode === "year"
+                    ? chipSelectedBgBorder
+                    : chipUnselectedBgBorder
                 }`}
                 onPress={() => setViewMode("year")}
               >
@@ -2687,7 +2741,8 @@ export default function App() {
                         ? row.totalUSD || 0
                         : row.totalVES || 0
                     );
-                    const pct = maxVal > 0 ? Math.min(100, (val / maxVal) * 100) : 0;
+                    const pct =
+                      maxVal > 0 ? Math.min(100, (val / maxVal) * 100) : 0;
                     return (
                       <View key={`catbar-${row.categoria}`} className="mb-3">
                         <View className="flex-row items-center mb-1">
@@ -2944,7 +2999,9 @@ export default function App() {
               />
               <Text
                 className={`text-xl font-bold mt-2 ${textPrimary}`}
-                style={{ fontFamily: fontsLoaded ? "Righteous_400Regular" : undefined }}
+                style={{
+                  fontFamily: fontsLoaded ? "Righteous_400Regular" : undefined,
+                }}
               >
                 ANZU
               </Text>
@@ -3235,7 +3292,6 @@ export default function App() {
         accentBtnClass={accentBtnClass}
         darkMode={darkMode}
       />
-
     </SafeAreaView>
   );
 }
