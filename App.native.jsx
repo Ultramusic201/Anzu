@@ -1,41 +1,78 @@
-import React, { useState, useEffect } from "react";
+import { Ionicons } from "@expo/vector-icons";
+import { openDatabaseAsync } from "expo-sqlite";
+import { StatusBar } from "expo-status-bar";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+// Arquitectura: constantes y utilidades extraídas para mejorar legibilidad (SRP/SOLID)
 import {
-  View,
+  MONTHS_SHORT,
+  WEEKDAY_LABELS,
+  AMOUNT_BUCKETS,
+  PIE_COLORS,
+} from "./src/constants/charts";
+import {
+  COLOR_GASTOS,
+  COLOR_GASTOS_ALT,
+  COLOR_INGRESOS,
+  COLOR_INGRESOS_ALT,
+} from "./src/constants/colors";
+import {
+  pad2,
+  formatYMD,
+  formatYM,
+  startOfWeek,
+  parseSearchDate,
+} from "./src/utils/date";
+import {
+  polarToCartesian,
+  arcPath,
+  arcStroke,
+  donutSegmentPath,
+} from "./src/utils/svgPaths";
+import {
+  ActivityIndicator,
+  Alert,
+  BackHandler,
+  Dimensions,
+  FlatList,
+  Modal,
+  Platform,
+  ScrollView,
   Text,
   TextInput,
   TouchableOpacity,
-  Modal,
-  FlatList,
-  Alert,
-  ScrollView,
+  Image,
+  View,
+  ToastAndroid,
 } from "react-native";
-import { StatusBar } from "expo-status-bar";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { openDatabaseAsync } from "expo-sqlite";
-import { Ionicons } from "@expo/vector-icons";
-import { Svg, G, Path, Circle } from "react-native-svg";
+import {
+  Circle,
+  G,
+  Line,
+  Path,
+  Polyline,
+  Rect,
+  Svg,
+  Text as SvgText,
+} from "react-native-svg";
+import { useFonts } from "expo-font";
+import { Righteous_400Regular } from "@expo-google-fonts/righteous";
+import * as FileSystem from "expo-file-system/legacy";
+import * as DocumentPicker from "expo-document-picker";
+import * as Sharing from "expo-sharing";
+import LineEvolutionChart from "./src/components/charts/LineEvolutionChart";
+import DonutCategoriesChart from "./src/components/charts/DonutCategoriesChart";
+import CategoryTopList from "./src/components/charts/CategoryTopList";
+import AmountBucketsChart from "./src/components/charts/AmountBucketsChart";
+import HeatmapChart from "./src/components/charts/HeatmapChart";
+import TasaDelDiaModal from "./src/components/modals/TasaDelDiaModal";
+import DataModal from "./src/components/modals/DataModal";
+import CreateCreditModal from "./src/components/modals/CreateCreditModal";
+import AddTransactionModal from "./src/components/modals/AddTransactionModal";
+import SearchTransactionsModal from "./src/components/modals/SearchTransactionsModal";
+import MonthPickerModal from "./src/components/modals/MonthPickerModal";
 
-// Utilidades de fecha sin dependencias
-const pad2 = (n) => String(n).padStart(2, "0");
-const formatYMD = (date) => {
-  const y = date.getFullYear();
-  const m = pad2(date.getMonth() + 1);
-  const d = pad2(date.getDate());
-  return `${y}-${m}-${d}`;
-};
-const formatYM = (date) => {
-  const y = date.getFullYear();
-  const m = pad2(date.getMonth() + 1);
-  return `${y}-${m}`;
-};
-
-const startOfWeek = (date) => {
-  const d = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-  const day = d.getDay();
-  const diff = (day + 6) % 7;
-  d.setDate(d.getDate() - diff);
-  return d;
-};
+// Utilidades de fecha importadas desde src/utils/date
 
 const MONTHS = [
   "Enero",
@@ -51,6 +88,7 @@ const MONTHS = [
   "Noviembre",
   "Diciembre",
 ];
+// MONTHS_SHORT importado desde src/constants/charts
 const CATEGORIES = [
   "COMIDA",
   "COMIDA CHATARRA",
@@ -75,10 +113,14 @@ const CATEGORIES = [
 ];
 
 const CREDIT_PLAN_DAYS = [7, 15, 21, 28];
+// WEEKDAY_LABELS, AMOUNT_BUCKETS y PIE_COLORS importados desde src/constants/charts
+// COLOR_* importados desde src/constants/colors
+const DAY_MS = 24 * 60 * 60 * 1000;
 export default function App() {
   const [tasaDolar, setTasaDolar] = useState("");
   const [showTasaModal, setShowTasaModal] = useState(false);
   const [transactions, setTransactions] = useState([]);
+  const [chartTransactions, setChartTransactions] = useState([]);
   const [showAddModal, setShowAddModal] = useState(false);
   const [newTransaction, setNewTransaction] = useState({
     tipo: "Gasto",
@@ -104,6 +146,9 @@ export default function App() {
   const [categoryMax, setCategoryMax] = useState(0);
   const [activeView, setActiveView] = useState("home");
   const [showDrawer, setShowDrawer] = useState(false);
+  const [showDataModal, setShowDataModal] = useState(false);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupMessage, setBackupMessage] = useState("");
   const [limitsByCategory, setLimitsByCategory] = useState({});
   const [txFilter, setTxFilter] = useState("todo");
   const [credits, setCredits] = useState([]);
@@ -119,6 +164,572 @@ export default function App() {
   const [selectedCredit, setSelectedCredit] = useState(null);
   const [creditInstallments, setCreditInstallments] = useState([]);
   const [selectedInstallments, setSelectedInstallments] = useState({});
+  const [displayCurrency, setDisplayCurrency] = useState("USD");
+  const [fontsLoaded] = useFonts({ Righteous_400Regular });
+  const lastBackPressRef = useRef(0);
+  const [showSearchModal, setShowSearchModal] = useState(false);
+  const [searchDescription, setSearchDescription] = useState("");
+  const [searchMinAmount, setSearchMinAmount] = useState("");
+  const [searchMaxAmount, setSearchMaxAmount] = useState("");
+  const [searchStartDate, setSearchStartDate] = useState("");
+  const [searchEndDate, setSearchEndDate] = useState("");
+  const [chartPeriod, setChartPeriod] = useState("week");
+  const [selectedLineIndex, setSelectedLineIndex] = useState(null);
+  const [chartCategoryMode, setChartCategoryMode] = useState("gastos");
+  const [selectedCategoryIndex, setSelectedCategoryIndex] = useState(null);
+  const [chartPieMode, setChartPieMode] = useState("gastos");
+  const [selectedPieIndex, setSelectedPieIndex] = useState(null);
+  const [selectedWeekdayIndex, setSelectedWeekdayIndex] = useState(null);
+  const [chartBucketMode, setChartBucketMode] = useState("gastos");
+  const [selectedBucketIndex, setSelectedBucketIndex] = useState(null);
+  const [chartHeatmapMode, setChartHeatmapMode] = useState("gastos");
+  const [selectedHeatmapCell, setSelectedHeatmapCell] = useState(null);
+  const [isFetchingOfficialRate, setIsFetchingOfficialRate] = useState(false);
+  const [officialRateError, setOfficialRateError] = useState(null);
+
+  const databaseFileName = "expense_tracker.db";
+
+  const getDatabaseDir = () => `${FileSystem.documentDirectory}SQLite`;
+  const getDatabaseFilePath = () => `${getDatabaseDir()}/${databaseFileName}`;
+
+  const ensureDatabaseDirectory = async () => {
+    const dir = getDatabaseDir();
+    const info = await FileSystem.getInfoAsync(dir);
+    if (!info.exists) {
+      await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
+    }
+    return dir;
+  };
+
+  // parseSearchDate importado desde src/utils/date
+
+  const normalizedTransactions = useMemo(() => {
+    if (!Array.isArray(chartTransactions) || chartTransactions.length === 0)
+      return [];
+    return chartTransactions
+      .map((t) => {
+        if (!t || !t.fecha) return null;
+        const parts = t.fecha.split("-").map((n) => parseInt(n, 10));
+        if (parts.length !== 3 || parts.some((n) => Number.isNaN(n))) return null;
+        const [year, month, day] = parts;
+        const date = new Date(year, month - 1, day);
+        if (Number.isNaN(date.getTime())) return null;
+        const amountUsd = Number(t.monto_usd_registro ?? 0);
+        const amountVes = Number(t.monto_ves_registro ?? 0);
+        return {
+          ...t,
+          categoria:
+            t.categoria ?? (t.tipo === "Ingreso" ? "INGRESOS" : "SIN CATEGORIA"),
+          date,
+          amountUsd: Number.isFinite(amountUsd) ? amountUsd : 0,
+          amountVes: Number.isFinite(amountVes) ? amountVes : 0,
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.date - b.date);
+  }, [chartTransactions]);
+
+  const chartBaseData = useMemo(() => {
+    const daily = new Map();
+    const monthly = new Map();
+    const categoryGastosMap = new Map();
+    const categoryIngresosMap = new Map();
+    const weekdayGastos = Array(7).fill(0);
+    const weekdayIngresos = Array(7).fill(0);
+    const bucketGastos = AMOUNT_BUCKETS.map(() => 0);
+    const bucketIngresos = AMOUNT_BUCKETS.map(() => 0);
+    const heatmapGastos = Array.from({ length: 7 }, () =>
+      AMOUNT_BUCKETS.map(() => 0)
+    );
+    const heatmapIngresos = Array.from({ length: 7 }, () =>
+      AMOUNT_BUCKETS.map(() => 0)
+    );
+    let totalGastos = 0;
+    let totalIngresos = 0;
+
+    normalizedTransactions.forEach((t) => {
+      const amount = t.amountUsd;
+      const isIngreso = t.tipo === "Ingreso";
+      if (isIngreso) totalIngresos += amount;
+      else totalGastos += amount;
+
+      const dayKey = formatYMD(t.date);
+      const dayEntry = daily.get(dayKey) || { ingresos: 0, gastos: 0 };
+      if (isIngreso) dayEntry.ingresos += amount;
+      else dayEntry.gastos += amount;
+      daily.set(dayKey, dayEntry);
+
+      const monthKey = formatYM(t.date);
+      const monthEntry = monthly.get(monthKey) || { ingresos: 0, gastos: 0 };
+      if (isIngreso) monthEntry.ingresos += amount;
+      else monthEntry.gastos += amount;
+      monthly.set(monthKey, monthEntry);
+
+      const catKey = String(t.categoria || "SIN CATEGORIA");
+      const targetCatMap = isIngreso ? categoryIngresosMap : categoryGastosMap;
+      targetCatMap.set(catKey, (targetCatMap.get(catKey) || 0) + amount);
+
+      const weekday = t.date.getDay();
+      if (isIngreso) weekdayIngresos[weekday] += amount;
+      else weekdayGastos[weekday] += amount;
+
+      const bucketIndex = AMOUNT_BUCKETS.findIndex(
+        (bucket) => amount >= bucket.min && amount < bucket.max
+      );
+      if (bucketIndex >= 0) {
+        if (isIngreso) {
+          bucketIngresos[bucketIndex] += 1;
+          heatmapIngresos[weekday][bucketIndex] += amount;
+        } else {
+          bucketGastos[bucketIndex] += 1;
+          heatmapGastos[weekday][bucketIndex] += amount;
+        }
+      }
+    });
+
+    const categoryGastos = Array.from(categoryGastosMap.entries())
+      .map(([categoria, total]) => ({ categoria, total }))
+      .sort((a, b) => b.total - a.total);
+    const categoryIngresos = Array.from(categoryIngresosMap.entries())
+      .map(([categoria, total]) => ({ categoria, total }))
+      .sort((a, b) => b.total - a.total);
+
+    return {
+      daily,
+      monthly,
+      categoryGastos,
+      categoryIngresos,
+      weekdayGastos,
+      weekdayIngresos,
+      bucketGastos,
+      bucketIngresos,
+      heatmapGastos,
+      heatmapIngresos,
+      totalGastos,
+      totalIngresos,
+    };
+  }, [normalizedTransactions]);
+
+  const lineChartData = useMemo(() => {
+    const labels = [];
+    const gastos = [];
+    const ingresos = [];
+    const now = new Date();
+
+    if (chartPeriod === "year") {
+      const start = new Date(now.getFullYear(), now.getMonth() - 11, 1);
+      for (let i = 0; i < 12; i += 1) {
+        const current = new Date(start.getFullYear(), start.getMonth() + i, 1);
+        const key = formatYM(current);
+        const entry = chartBaseData.monthly.get(key) || { gastos: 0, ingresos: 0 };
+        labels.push(`${MONTHS_SHORT[current.getMonth()]} '${String(current.getFullYear()).slice(-2)}`);
+        gastos.push(entry.gastos);
+        ingresos.push(entry.ingresos);
+      }
+    } else {
+      const span = chartPeriod === "week" ? 7 : 30;
+      for (let i = span - 1; i >= 0; i -= 1) {
+        const current = new Date(
+          now.getFullYear(),
+          now.getMonth(),
+          now.getDate() - i
+        );
+        const key = formatYMD(current);
+        const entry = chartBaseData.daily.get(key) || { gastos: 0, ingresos: 0 };
+        labels.push(`${pad2(current.getDate())}/${pad2(current.getMonth() + 1)}`);
+        gastos.push(entry.gastos);
+        ingresos.push(entry.ingresos);
+      }
+    }
+
+    return { labels, gastos, ingresos };
+  }, [chartBaseData, chartPeriod]);
+
+  const categoryChartData = useMemo(() => {
+    const source =
+      chartCategoryMode === "gastos"
+        ? chartBaseData.categoryGastos
+        : chartBaseData.categoryIngresos;
+    return source.slice(0, 8);
+  }, [chartBaseData, chartCategoryMode]);
+
+  const pieChartData = useMemo(() => {
+    const source =
+      chartPieMode === "gastos"
+        ? chartBaseData.categoryGastos
+        : chartBaseData.categoryIngresos;
+    const total = source.reduce((sum, item) => sum + item.total, 0);
+    return { data: source, total };
+  }, [chartBaseData, chartPieMode]);
+
+  const amountBucketData = useMemo(() => {
+    return AMOUNT_BUCKETS.map((bucket, index) => ({
+      label: bucket.label,
+      value:
+        chartBucketMode === "gastos"
+          ? chartBaseData.bucketGastos[index] || 0
+          : chartBaseData.bucketIngresos[index] || 0,
+    }));
+  }, [chartBaseData, chartBucketMode]);
+
+  const chartPieSegments = useMemo(() => {
+    const outerR = 90;
+    const innerR = 52;
+    const cx = 100;
+    const cy = 100;
+    const total = pieChartData.total;
+    const entries = pieChartData.data.filter((item) => (item.total || 0) > 0);
+    if (entries.length === 0 || total <= 0) return [];
+
+    const fullCircle = Math.PI * 2;
+    const minAngle = (Math.PI / 180) * 3;
+    const baseGap = (Math.PI / 180) * 1.5;
+    const angles = entries.map((item) =>
+      Math.max(minAngle, (item.total / total) * fullCircle)
+    );
+
+    let sumAngles = angles.reduce((acc, angle) => acc + angle, 0);
+    if (sumAngles > fullCircle) {
+      let excess = sumAngles - fullCircle;
+      const adjustable = angles
+        .map((angle, index) => (angle > minAngle ? index : -1))
+        .filter((index) => index >= 0);
+      let adjustableTotal = adjustable.reduce(
+        (acc, index) => acc + (angles[index] - minAngle),
+        0
+      );
+      if (adjustableTotal > 0) {
+        adjustable.forEach((index) => {
+          const reducible = angles[index] - minAngle;
+          const delta = excess * (reducible / adjustableTotal);
+          angles[index] = Math.max(minAngle, angles[index] - delta);
+        });
+      }
+      sumAngles = angles.reduce((acc, angle) => acc + angle, 0);
+    }
+
+    const remaining = fullCircle - sumAngles;
+    if (remaining > 1e-6) {
+      const maxIndex = angles.indexOf(Math.max(...angles));
+      angles[maxIndex] += remaining;
+    }
+
+    const segments = [];
+    let current = -Math.PI / 2;
+    angles.forEach((angle, index) => {
+      const entry = entries[index];
+      const start = current;
+      const end = start + angle;
+      const adjStart = start + baseGap / 2;
+      const adjEnd = end - baseGap / 2;
+      if (adjEnd > adjStart) {
+        segments.push({
+          path: donutSegmentPath(cx, cy, outerR, innerR, adjStart, adjEnd),
+          color: PIE_COLORS[index % PIE_COLORS.length],
+          label: entry.categoria,
+          value: entry.total,
+          percent: (entry.total / total) * 100,
+        });
+      }
+      current = end;
+    });
+
+    return segments;
+  }, [pieChartData]);
+
+  const heatmapMatrix =
+    chartHeatmapMode === "gastos"
+      ? chartBaseData.heatmapGastos
+      : chartBaseData.heatmapIngresos;
+  const heatmapMax = heatmapMatrix.reduce((max, row) => {
+    const rowMax = row.reduce((rMax, value) => Math.max(rMax, value || 0), 0);
+    return Math.max(max, rowMax);
+  }, 0);
+
+  const windowWidth = Dimensions.get("window").width || 360;
+  const chartWidth = Math.min(windowWidth - 48, 620);
+  const lineChartHeight = 200;
+  const lineLabels = lineChartData.labels;
+  const lineMaxValue = Math.max(
+    1,
+    ...lineChartData.gastos,
+    ...lineChartData.ingresos
+  );
+  const lineStep =
+    lineLabels.length > 1 ? chartWidth / (lineLabels.length - 1) : chartWidth;
+  const lineTopPadding = 16;
+  const lineBottomPadding = 20;
+  const lineDrawableHeight = lineChartHeight - lineTopPadding - lineBottomPadding;
+  const gastosLinePoints = lineLabels.length
+    ? lineChartData.gastos
+        .map((value, index) => {
+          const x =
+            lineLabels.length > 1
+              ? lineStep * index
+              : chartWidth / 2;
+          const y =
+            lineTopPadding +
+            (lineDrawableHeight -
+              (value / lineMaxValue) * lineDrawableHeight);
+          return `${x},${y}`;
+        })
+        .join(" ")
+    : "";
+  const ingresosLinePoints = lineLabels.length
+    ? lineChartData.ingresos
+        .map((value, index) => {
+          const x =
+            lineLabels.length > 1
+              ? lineStep * index
+              : chartWidth / 2;
+          const y =
+            lineTopPadding +
+            (lineDrawableHeight -
+              (value / lineMaxValue) * lineDrawableHeight);
+          return `${x},${y}`;
+        })
+        .join(" ")
+    : "";
+  const lineHighlightX =
+    selectedLineIndex != null
+      ? lineLabels.length > 1
+        ? lineStep * selectedLineIndex
+        : chartWidth / 2
+      : null;
+  const highlightedLinePoint =
+    selectedLineIndex != null && lineLabels[selectedLineIndex]
+      ? {
+          label: lineLabels[selectedLineIndex],
+          gastos: lineChartData.gastos[selectedLineIndex] || 0,
+          ingresos: lineChartData.ingresos[selectedLineIndex] || 0,
+          yGastos:
+            lineTopPadding +
+            (lineDrawableHeight -
+              ((lineChartData.gastos[selectedLineIndex] || 0) / lineMaxValue) *
+                lineDrawableHeight),
+          yIngresos:
+            lineTopPadding +
+            (lineDrawableHeight -
+              ((lineChartData.ingresos[selectedLineIndex] || 0) /
+                lineMaxValue) *
+                lineDrawableHeight),
+        }
+      : null;
+
+  const categoryMaxValue = Math.max(
+    1,
+    ...categoryChartData.map((item) => item.total || 0)
+  );
+  const bucketMaxValue = Math.max(
+    1,
+    ...amountBucketData.map((item) => item.value || 0)
+  );
+
+  const chartCurrency = "USD";
+  const formatUsd = (value) =>
+    `$ ${Number(value || 0).toFixed(value >= 1000 ? 0 : 2)}`;
+
+  useEffect(() => {
+    setSelectedLineIndex(null);
+  }, [chartPeriod, chartBaseData]);
+
+  useEffect(() => {
+    setSelectedCategoryIndex(null);
+  }, [chartCategoryMode, chartBaseData]);
+
+  useEffect(() => {
+    setSelectedPieIndex(null);
+  }, [chartPieMode, chartBaseData]);
+
+  useEffect(() => {
+    setSelectedBucketIndex(null);
+  }, [chartBucketMode, chartBaseData]);
+
+  useEffect(() => {
+    setSelectedHeatmapCell(null);
+  }, [chartHeatmapMode, chartBaseData]);
+
+  const ensureDatabaseFileExists = async () => {
+    try {
+      await ensureDatabaseDirectory();
+      const path = getDatabaseFilePath();
+      const info = await FileSystem.getInfoAsync(path);
+      if (!info.exists) {
+        throw new Error("La base de datos no se encuentra disponible");
+      }
+      return path;
+    } catch (error) {
+      console.error("[Backup ensureDatabaseFileExists]", error);
+      throw error;
+    }
+  };
+
+  const closeDataModal = () => {
+    if (backupBusy) return;
+    setShowDataModal(false);
+    setBackupMessage("");
+  };
+
+  const exportDatabase = async () => {
+    if (Platform.OS === "web") {
+      Alert.alert(
+        "No disponible",
+        "La exportación de base de datos no está soportada en la versión web."
+      );
+      return;
+    }
+    if (!db) {
+      Alert.alert("Error", "Base de datos no inicializada aún");
+      return;
+    }
+    setBackupBusy(true);
+    setBackupMessage("Preparando archivo para exportar...");
+    try {
+      const sourcePath = await ensureDatabaseFileExists();
+      const timestamp = new Date()
+        .toISOString()
+        .replace(/[:.]/g, "-")
+        .replace("T", "-")
+        .slice(0, 19);
+      const filename = `anzu-backup-${timestamp}.db`;
+
+      let exportSucceeded = false;
+
+      if (Platform.OS === "android") {
+        const permissions =
+          await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
+        if (!permissions.granted) {
+          Alert.alert(
+            "Permiso requerido",
+            "Debes seleccionar una carpeta para guardar el respaldo."
+          );
+        } else {
+          try {
+            const base64 = await FileSystem.readAsStringAsync(sourcePath, {
+              encoding: FileSystem.EncodingType.Base64,
+            });
+            const fileUri = await FileSystem.StorageAccessFramework.createFileAsync(
+              permissions.directoryUri,
+              filename,
+              "application/octet-stream"
+            );
+            await FileSystem.writeAsStringAsync(fileUri, base64, {
+              encoding: FileSystem.EncodingType.Base64,
+            });
+            Alert.alert(
+              "Exportación lista",
+              `Se guardó el respaldo como ${filename} en la ubicación seleccionada.`
+            );
+            exportSucceeded = true;
+          } catch (safError) {
+            console.error("[Backup exportDatabase SAF]", safError);
+            Alert.alert(
+              "Error",
+              "No se pudo guardar el archivo en la carpeta seleccionada."
+            );
+          }
+        }
+      } else {
+        const exportDir = `${FileSystem.documentDirectory}exports/`;
+        await FileSystem.makeDirectoryAsync(exportDir, { intermediates: true });
+        const targetPath = `${exportDir}${filename}`;
+        await FileSystem.copyAsync({ from: sourcePath, to: targetPath });
+
+        if (await Sharing.isAvailableAsync()) {
+          setBackupMessage("Compartiendo archivo...");
+          await Sharing.shareAsync(targetPath, {
+            mimeType: "application/octet-stream",
+            dialogTitle: "Exportar base de datos",
+          });
+        } else {
+          Alert.alert(
+            "Exportación lista",
+            "El archivo se creó en la carpeta interna de la app."
+          );
+        }
+        exportSucceeded = true;
+      }
+
+      if (exportSucceeded) {
+        setShowDataModal(false);
+        setBackupMessage("");
+      }
+    } catch (error) {
+      console.error("[Backup exportDatabase]", error);
+      Alert.alert("Error", "No se pudo exportar la base de datos.");
+    } finally {
+      setBackupBusy(false);
+      setBackupMessage("");
+    }
+  };
+
+  const importDatabase = async () => {
+    if (Platform.OS === "web") {
+      Alert.alert(
+        "No disponible",
+        "La importación de base de datos no está soportada en la versión web."
+      );
+      return;
+    }
+    if (!db) {
+      Alert.alert("Error", "Base de datos no inicializada aún");
+      return;
+    }
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: "*/*",
+        copyToCacheDirectory: true,
+      });
+      if (result.canceled || !result.assets?.length) {
+        return;
+      }
+      setBackupBusy(true);
+      setBackupMessage("Importando archivo seleccionado...");
+      const asset = result.assets[0];
+      const sourceUri = asset.uri;
+      if (!sourceUri) {
+        throw new Error("No se pudo acceder al archivo seleccionado");
+      }
+
+      await ensureDatabaseDirectory();
+      const destPath = getDatabaseFilePath();
+      if (db?.closeAsync) {
+        try {
+          await db.closeAsync();
+        } catch (closeError) {
+          console.error("[Backup importDatabase close]", closeError);
+        }
+      }
+      setDb(null);
+      await FileSystem.deleteAsync(destPath, { idempotent: true });
+      await FileSystem.copyAsync({ from: sourceUri, to: destPath });
+      setBackupMessage("Recargando datos...");
+
+      const database = await openDatabaseAsync(databaseFileName);
+      setDb(database);
+      await initializeDB(database);
+      await loadThemeFromDB(database);
+      await loadLimits(database);
+      await loadTransactions(database);
+      await loadCategoryTotals(database);
+      await loadCredits(database);
+      await checkTasaDia(database);
+
+      setShowDataModal(false);
+      setBackupMessage("");
+      Alert.alert("Éxito", "La base de datos se importó correctamente.");
+    } catch (error) {
+      console.error("[Backup importDatabase]", error);
+      Alert.alert("Error", "No se pudo importar la base de datos.");
+    } finally {
+      setBackupBusy(false);
+      setBackupMessage("");
+    }
+  };
+
+  useEffect(() => {
+    setChartTransactions(transactions);
+  }, [transactions]);
 
   useEffect(() => {
     (async () => {
@@ -153,6 +764,82 @@ export default function App() {
     viewMode,
     db,
     bootstrapping,
+  ]);
+
+  useEffect(() => {
+    if (Platform.OS !== "android") return;
+
+    const onBackPress = () => {
+      if (showDrawer) {
+        setShowDrawer(false);
+        return true;
+      }
+
+      if (showCreateCreditModal) {
+        setShowCreateCreditModal(false);
+        return true;
+      }
+
+      if (showAddModal) {
+        setShowAddModal(false);
+        return true;
+      }
+
+      if (showMonthModal) {
+        setShowMonthModal(false);
+        return true;
+      }
+
+      if (showTasaModal) {
+        setShowTasaModal(false);
+        return true;
+      }
+
+      if (showDataModal) {
+        closeDataModal();
+        return true;
+      }
+
+      if (selectedCredit) {
+        setSelectedCredit(null);
+        setSelectedInstallments({});
+        return true;
+      }
+
+      if (activeView !== "home") {
+        setActiveView("home");
+        return true;
+      }
+
+      const now = Date.now();
+      if (now - lastBackPressRef.current < 2000) {
+        BackHandler.exitApp();
+        return true;
+      }
+
+      lastBackPressRef.current = now;
+      ToastAndroid.show(
+        "Pulsa 2 veces para cerrar la aplicación",
+        ToastAndroid.SHORT
+      );
+      return true;
+    };
+
+    const subscription = BackHandler.addEventListener(
+      "hardwareBackPress",
+      onBackPress
+    );
+
+    return () => subscription.remove();
+  }, [
+    activeView,
+    showDrawer,
+    showCreateCreditModal,
+    showAddModal,
+    showMonthModal,
+    showTasaModal,
+    showDataModal,
+    selectedCredit,
   ]);
 
   const ensureCategoriaColumn = async (database) => {
@@ -206,8 +893,18 @@ export default function App() {
     const montoCuota = parseFloat(newCredit.montoCuotaUsd);
     const plan = parseInt(newCredit.planDias, 10);
 
-    if (!nombre || !Number.isFinite(total) || !Number.isFinite(inicial) || !Number.isFinite(cuotasCant) || !Number.isFinite(montoCuota) || !Number.isFinite(plan)) {
-      Alert.alert("Error", "Complete todos los campos del crédito correctamente");
+    if (
+      !nombre ||
+      !Number.isFinite(total) ||
+      !Number.isFinite(inicial) ||
+      !Number.isFinite(cuotasCant) ||
+      !Number.isFinite(montoCuota) ||
+      !Number.isFinite(plan)
+    ) {
+      Alert.alert(
+        "Error",
+        "Complete todos los campos del crédito correctamente"
+      );
       return;
     }
     if (!CREDIT_PLAN_DAYS.includes(plan)) {
@@ -216,7 +913,10 @@ export default function App() {
     }
     const esperado = inicial + cuotasCant * montoCuota;
     if (Math.abs(total - esperado) > 0.01) {
-      Alert.alert("Inconsistencia", "Monto Total = Inicial + (Cantidad de cuotas × Monto por cuota)");
+      Alert.alert(
+        "Inconsistencia",
+        "Monto Total = Inicial + (Cantidad de cuotas × Monto por cuota)"
+      );
       return;
     }
     const rate = parseFloat(tasaDolar);
@@ -231,9 +931,20 @@ export default function App() {
       await db.withTransactionAsync(async () => {
         await db.runAsync(
           "INSERT INTO creditos (nombre, fecha_creacion, monto_total_usd, inicial_usd, cuotas_cantidad, monto_cuota_usd, dias_plan, estado) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-          [nombre, today, total, inicial, cuotasCant, montoCuota, plan, "activo"]
+          [
+            nombre,
+            today,
+            total,
+            inicial,
+            cuotasCant,
+            montoCuota,
+            plan,
+            "activo",
+          ]
         );
-        const last = await db.getAllAsync("SELECT id FROM creditos ORDER BY id DESC LIMIT 1");
+        const last = await db.getAllAsync(
+          "SELECT id FROM creditos ORDER BY id DESC LIMIT 1"
+        );
         const creditId = last && last[0] ? last[0].id : null;
         if (!creditId) throw new Error("No se obtuvo ID del crédito");
         for (let i = 1; i <= cuotasCant; i++) {
@@ -249,7 +960,17 @@ export default function App() {
         const montoVes = inicial * rate;
         await db.runAsync(
           "INSERT INTO transacciones (fecha, tipo, descripcion, monto_original, moneda_original, monto_usd_registro, monto_ves_registro, categoria, tasa_ves_a_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-          [today, "Gasto", `Inicial crédito ${nombre}`, montoUsd, "USD", montoUsd, montoVes, "CREDITOS", rate]
+          [
+            today,
+            "Gasto",
+            `Inicial crédito ${nombre}`,
+            montoUsd,
+            "USD",
+            montoUsd,
+            montoVes,
+            "CREDITOS",
+            rate,
+          ]
         );
       });
       setShowCreateCreditModal(false);
@@ -284,7 +1005,9 @@ export default function App() {
     }
     const rows = payAll
       ? creditInstallments.filter((r) => r.estado !== "pagado")
-      : creditInstallments.filter((r) => selectedInstallments[r.id] && r.estado !== "pagado");
+      : creditInstallments.filter(
+          (r) => selectedInstallments[r.id] && r.estado !== "pagado"
+        );
     if (rows.length === 0) {
       Alert.alert("Atención", "No hay cuotas seleccionadas pendientes");
       return;
@@ -308,7 +1031,9 @@ export default function App() {
           [
             today,
             "Gasto",
-            `Pago cuotas crédito ${selectedCredit.nombre || selectedCredit.id} (${nums})`,
+            `Pago cuotas crédito ${
+              selectedCredit.nombre || selectedCredit.id
+            } (${nums})`,
             sumUsd,
             "USD",
             sumUsd,
@@ -323,7 +1048,10 @@ export default function App() {
         );
         const remaining = pend && pend[0] ? Number(pend[0].c || 0) : 0;
         if (remaining === 0) {
-          await db.runAsync("UPDATE creditos SET estado = 'pagado' WHERE id = ?", [selectedCredit.id]);
+          await db.runAsync(
+            "UPDATE creditos SET estado = 'pagado' WHERE id = ?",
+            [selectedCredit.id]
+          );
         }
       });
       setSelectedInstallments({});
@@ -447,6 +1175,9 @@ export default function App() {
     if (activeView === "credits") {
       loadCredits(db);
     }
+    if (activeView === "categories") {
+      loadCategoryTotals(db);
+    }
   }, [activeView, db]);
 
   const ensureTasaColumn = async (database) => {
@@ -462,6 +1193,29 @@ export default function App() {
       }
     } catch (e) {
       console.error("[DB ensureTasaColumn] error", e);
+    }
+  };
+  const ensureTransactionColumns = async (database) => {
+    try {
+      const cols = await database.getAllAsync(
+        "PRAGMA table_info(transacciones)"
+      );
+      const names = cols.map((c) => c.name);
+      const addIfMissing = async (name, type) => {
+        if (!names.includes(name)) {
+          await database.execAsync(
+            `ALTER TABLE transacciones ADD COLUMN ${name} ${type};`
+          );
+        }
+      };
+      await addIfMissing("monto_original", "REAL");
+      await addIfMissing("moneda_original", "TEXT");
+      await addIfMissing("monto_usd_registro", "REAL");
+      await addIfMissing("monto_ves_registro", "REAL");
+      await addIfMissing("categoria", "TEXT");
+      await addIfMissing("tasa_ves_a_usd", "REAL");
+    } catch (e) {
+      console.error("[DB ensureTransactionColumns] error", e);
     }
   };
 
@@ -527,6 +1281,7 @@ export default function App() {
       });
       await ensureCategoriaColumn(database);
       await ensureTasaColumn(database);
+      await ensureTransactionColumns(database);
     } catch (e) {
       console.error("[DB initializeDB] error", e);
     }
@@ -541,12 +1296,35 @@ export default function App() {
         [today]
       );
       if (rows.length === 0) {
+        setOfficialRateError(null);
         setShowTasaModal(true);
       } else {
         setTasaDolar(rows[0].tasa_ves_a_usd.toString());
       }
     } catch (e) {
       console.error("[DB checkTasaDia] error", e);
+    }
+  };
+
+  const fetchOfficialRate = async () => {
+    try {
+      setIsFetchingOfficialRate(true);
+      setOfficialRateError(null);
+      const response = await fetch("https://ve.dolarapi.com/v1/dolares/oficial");
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const data = await response.json();
+      const promedio = data?.promedio;
+      if (typeof promedio !== "number" || Number.isNaN(promedio) || promedio <= 0) {
+        throw new Error("Invalid promedio value");
+      }
+      setTasaDolar(String(promedio));
+    } catch (error) {
+      console.error("[Tasa fetchOfficialRate]", error);
+      setOfficialRateError("No se pudo obtener la tasa oficial. Ingrésala manualmente.");
+    } finally {
+      setIsFetchingOfficialRate(false);
     }
   };
 
@@ -570,6 +1348,7 @@ export default function App() {
         );
       });
       setShowTasaModal(false);
+      setOfficialRateError(null);
       await loadTransactions();
     } catch (e) {
       console.error("[DB guardarTasaDia] error", e);
@@ -623,29 +1402,43 @@ export default function App() {
         });
         return;
       }
-      // debug
-      console.log("[DB loadTransactions] period", {
-        viewMode,
-        startDate,
-        endDate,
-      });
-      const rows = await database.getAllAsync(
-        "SELECT * FROM transacciones WHERE fecha BETWEEN ? AND ? ORDER BY fecha DESC",
-        [startDate, endDate]
-      );
+
+      const parsedStart = parseSearchDate(searchStartDate);
+      const parsedEnd = parseSearchDate(searchEndDate);
+      const effectiveStart = parsedStart || startDate;
+      const effectiveEnd = parsedEnd || endDate;
+      const [fromDate, toDate] =
+        effectiveStart && effectiveEnd && effectiveStart > effectiveEnd
+          ? [effectiveEnd, effectiveStart]
+          : [effectiveStart, effectiveEnd];
+
+      const conditions = ["fecha BETWEEN ? AND ?"];
+      const params = [fromDate, toDate];
+
+      const desc = (searchDescription || "").trim().toLowerCase();
+      if (desc.length) {
+        conditions.push("LOWER(descripcion) LIKE ?");
+        params.push(`%${desc}%`);
+      }
+
+      const minAmount = parseFloat(searchMinAmount);
+      if (Number.isFinite(minAmount)) {
+        conditions.push("monto_usd_registro >= ?");
+        params.push(minAmount);
+      }
+
+      const maxAmount = parseFloat(searchMaxAmount);
+      if (Number.isFinite(maxAmount)) {
+        conditions.push("monto_usd_registro <= ?");
+        params.push(maxAmount);
+      }
+
+      const query = `SELECT * FROM transacciones WHERE ${conditions.join(
+        " AND "
+      )} ORDER BY fecha DESC`;
+
+      const rows = await database.getAllAsync(query, params);
       setTransactions(rows);
-      console.log(
-        "[DB loadTransactions] rows",
-        rows.length,
-        rows[0]
-          ? {
-              id: rows[0].id,
-              fecha: rows[0].fecha,
-              tipo: rows[0].tipo,
-              categoria: rows[0].categoria,
-            }
-          : {}
-      );
     } catch (e) {
       console.error("[DB loadTransactions] error", e);
       try {
@@ -653,11 +1446,68 @@ export default function App() {
           "SELECT * FROM transacciones ORDER BY fecha DESC LIMIT 200"
         );
         setTransactions(rows);
-        console.log("[DB loadTransactions fallback] rows", rows.length);
       } catch (e2) {
         console.error("[DB loadTransactions fallback] error", e2);
       }
     }
+  };
+
+  const applyTransactionSearch = () => {
+    const minAmount = parseFloat(searchMinAmount);
+    const maxAmount = parseFloat(searchMaxAmount);
+    if (Number.isFinite(minAmount) && Number.isFinite(maxAmount)) {
+      if (maxAmount < minAmount) {
+        Alert.alert(
+          "Montos inválidos",
+          "El monto máximo no puede ser menor al monto mínimo."
+        );
+        return;
+      }
+    }
+
+    const parsedStart = parseSearchDate(searchStartDate);
+    const parsedEnd = parseSearchDate(searchEndDate);
+
+    if (searchStartDate && !parsedStart) {
+      Alert.alert(
+        "Fecha inicial inválida",
+        "Usa el formato DD/MM/AAAA."
+      );
+      return;
+    }
+
+    if (searchEndDate && !parsedEnd) {
+      Alert.alert(
+        "Fecha final inválida",
+        "Usa el formato DD/MM/AAAA."
+      );
+      return;
+    }
+
+    if (parsedStart && parsedEnd && parsedEnd < parsedStart) {
+      Alert.alert(
+        "Fechas inválidas",
+        "La fecha final no puede ser menor que la fecha inicial."
+      );
+      return;
+    }
+
+    setShowSearchModal(false);
+    setTimeout(() => {
+      loadTransactions();
+    }, 0);
+  };
+
+  const resetTransactionSearch = () => {
+    setSearchDescription("");
+    setSearchMinAmount("");
+    setSearchMaxAmount("");
+    setSearchStartDate("");
+    setSearchEndDate("");
+    setShowSearchModal(false);
+    setTimeout(() => {
+      loadTransactions();
+    }, 0);
   };
 
   const loadCategoryTotals = async (database = db) => {
@@ -890,6 +1740,14 @@ export default function App() {
     CRIPTO: "#06b6d4",
     DEUDAS: "#b91c1c",
     CREDITOS: "#2563eb",
+    HIGIENE: "#0ea5e9",
+    PERFUMERIA: "#f472b6",
+    ELECTRODOMESTICOS: "#64748b",
+    TELEFONO: "#22d3ee",
+    VEHICULO: "#eab308",
+    TRANSPORTE: "#2dd4bf",
+    EDUCACION: "#60a5fa",
+    MASCOTAS: "#a78bfa",
     "SIN CATEGORIA": "#9ca3af",
     INGRESO: "#16a34a",
   };
@@ -903,9 +1761,17 @@ export default function App() {
     PERSONAS: "people",
     ROPA: "shirt",
     AHORRO: "wallet",
-    CRIPTO: "cash",
+    CRIPTO: "logo-bitcoin",
     DEUDAS: "trending-down",
     CREDITOS: "card",
+    HIGIENE: "water",
+    PERFUMERIA: "flower",
+    ELECTRODOMESTICOS: "tv",
+    TELEFONO: "phone-portrait",
+    VEHICULO: "car",
+    TRANSPORTE: "bus",
+    EDUCACION: "school",
+    MASCOTAS: "paw",
     "SIN CATEGORIA": "pricetag",
     INGRESO: "trending-up",
   };
@@ -918,36 +1784,7 @@ export default function App() {
       cat ?? (tipo === "Ingreso" ? "INGRESO" : "SIN CATEGORIA")
     ] || "pricetag";
 
-  const polarToCartesian = (cx, cy, r, angle) => {
-    return { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) };
-  };
-  const arcPath = (cx, cy, r, start, end) => {
-    const startP = polarToCartesian(cx, cy, r, start);
-    const endP = polarToCartesian(cx, cy, r, end);
-    const largeArc = end - start > Math.PI ? 1 : 0;
-    return `M ${cx} ${cy} L ${startP.x} ${startP.y} A ${r} ${r} 0 ${largeArc} 1 ${endP.x} ${endP.y} Z`;
-  };
-  const arcStroke = (cx, cy, r, start, end) => {
-    const startP = polarToCartesian(cx, cy, r, start);
-    const endP = polarToCartesian(cx, cy, r, end);
-    const largeArc = end - start > Math.PI ? 1 : 0;
-    return `M ${startP.x} ${startP.y} A ${r} ${r} 0 ${largeArc} 1 ${endP.x} ${endP.y}`;
-  };
-
-  const donutSegmentPath = (cx, cy, rOuter, rInner, start, end) => {
-    const largeArc = end - start > Math.PI ? 1 : 0;
-    const oStart = polarToCartesian(cx, cy, rOuter, start);
-    const oEnd = polarToCartesian(cx, cy, rOuter, end);
-    const iEnd = polarToCartesian(cx, cy, rInner, end);
-    const iStart = polarToCartesian(cx, cy, rInner, start);
-    return [
-      `M ${oStart.x} ${oStart.y}`,
-      `A ${rOuter} ${rOuter} 0 ${largeArc} 1 ${oEnd.x} ${oEnd.y}`,
-      `L ${iEnd.x} ${iEnd.y}`,
-      `A ${rInner} ${rInner} 0 ${largeArc} 0 ${iStart.x} ${iStart.y}`,
-      "Z",
-    ].join(" ");
-  };
+  // Helpers de paths SVG importados desde src/utils/svgPaths
 
   const cx = 110,
     cy = 110,
@@ -1009,6 +1846,7 @@ export default function App() {
             pct: totalGastosVES > 0 ? (row.totalVES / totalGastosVES) * 100 : 0,
             label: row.categoria,
             usd: row.totalUSD,
+            ves: row.totalVES,
           });
         }
         aStart = aEnd;
@@ -1115,21 +1953,33 @@ export default function App() {
           >
             <Ionicons name="menu" size={22} color="#fff" />
           </TouchableOpacity>
-          <TouchableOpacity
-            className="px-3 py-1.5 rounded-full bg-white/20"
-            onPress={toggleTheme}
-          >
-            <View className="flex-row items-center">
-              <Ionicons
-                name={darkMode ? "sunny" : "moon"}
-                size={16}
-                color="#fff"
-              />
-              <Text className="text-white" style={{ marginLeft: 6 }}>
-                {darkMode ? "Claro" : "Oscuro"}
+          <View className="flex-row items-center">
+            <TouchableOpacity
+              className="px-3 py-1.5 rounded-full bg-white/20 mr-2"
+              onPress={() =>
+                setDisplayCurrency((c) => (c === "USD" ? "VES" : "USD"))
+              }
+            >
+              <Text className="text-white font-semibold">
+                {displayCurrency === "USD" ? "$ USD" : "Bs."}
               </Text>
-            </View>
-          </TouchableOpacity>
+            </TouchableOpacity>
+            <TouchableOpacity
+              className="px-3 py-1.5 rounded-full bg-white/20"
+              onPress={toggleTheme}
+            >
+              <View className="flex-row items-center">
+                <Ionicons
+                  name={darkMode ? "sunny" : "moon"}
+                  size={16}
+                  color="#fff"
+                />
+                <Text className="text-white" style={{ marginLeft: 6 }}>
+                  {darkMode ? "Claro" : "Oscuro"}
+                </Text>
+              </View>
+            </TouchableOpacity>
+          </View>
         </View>
         <Text className="text-white text-xl font-bold text-center">
           Control de Gastos
@@ -1284,24 +2134,27 @@ export default function App() {
                               justifyContent: "center",
                             }}
                           >
-                            <Text
-                              style={{
-                                color: darkMode ? "#ffffff" : "#111827",
-                                fontSize: 18,
-                                fontWeight: "700",
-                              }}
-                            >
-                              $ {Number(totalGastosUSD || 0).toFixed(2)}
-                            </Text>
-                            <Text
-                              style={{
-                                color: darkMode ? "#ffffff" : "#111827",
-                                fontSize: 12,
-                                marginTop: 2,
-                              }}
-                            >
-                              Bs. {Number(totalGastosVES || 0).toFixed(2)}
-                            </Text>
+                            {displayCurrency === "USD" ? (
+                              <Text
+                                style={{
+                                  color: darkMode ? "#ffffff" : "#111827",
+                                  fontSize: 18,
+                                  fontWeight: "700",
+                                }}
+                              >
+                                $ {Number(totalGastosUSD || 0).toFixed(2)}
+                              </Text>
+                            ) : (
+                              <Text
+                                style={{
+                                  color: darkMode ? "#ffffff" : "#111827",
+                                  fontSize: 18,
+                                  fontWeight: "700",
+                                }}
+                              >
+                                Bs. {Number(totalGastosVES || 0).toFixed(2)}
+                              </Text>
+                            )}
                           </View>
                         </View>
                       </View>
@@ -1323,8 +2176,10 @@ export default function App() {
                               {seg.label}
                             </Text>
                             <Text className={`ml-auto ${textMuted}`}>
-                              $ {Number(seg.usd || 0).toFixed(2)} •{" "}
-                              {seg.pct.toFixed(0)}%
+                              {displayCurrency === "USD"
+                                ? `$ ${Number(seg.usd || 0).toFixed(2)}`
+                                : `Bs. ${Number(seg.ves || 0).toFixed(2)}`}
+                              {" "}• {seg.pct.toFixed(0)}%
                             </Text>
                           </View>
                         ))}
@@ -1352,10 +2207,9 @@ export default function App() {
                     <Text className={textPrimary}>Ingresos:</Text>
                     <View className="items-end">
                       <Text className="text-green-600">
-                        Bs. {totales.ingresosVES}
-                      </Text>
-                      <Text className="text-green-600 text-xs">
-                        $ {totales.ingresosUSD}
+                        {displayCurrency === "USD"
+                          ? `$ ${totales.ingresosUSD}`
+                          : `Bs. ${totales.ingresosVES}`}
                       </Text>
                     </View>
                   </View>
@@ -1367,10 +2221,9 @@ export default function App() {
                     </Text>
                     <View className="items-end">
                       <Text className="text-red-600">
-                        Bs. {totales.gastosVES}
-                      </Text>
-                      <Text className="text-red-600 text-xs">
-                        $ {totales.gastosUSD}
+                        {displayCurrency === "USD"
+                          ? `$ ${totales.gastosUSD}`
+                          : `Bs. ${totales.gastosVES}`}
                       </Text>
                     </View>
                   </View>
@@ -1380,21 +2233,18 @@ export default function App() {
                     <View className="items-end">
                       <Text
                         className={
-                          parseFloat(totales.balanceVES) >= 0
+                          parseFloat(
+                            displayCurrency === "USD"
+                              ? totales.balanceUSD
+                              : totales.balanceVES
+                          ) >= 0
                             ? "text-green-600"
                             : "text-red-600"
                         }
                       >
-                        Bs. {totales.balanceVES}
-                      </Text>
-                      <Text
-                        className={`${
-                          parseFloat(totales.balanceUSD) >= 0
-                            ? "text-green-600"
-                            : "text-red-600"
-                        } text-xs`}
-                      >
-                        $ {totales.balanceUSD}
+                        {displayCurrency === "USD"
+                          ? `$ ${totales.balanceUSD}`
+                          : `Bs. ${totales.balanceVES}`}
                       </Text>
                     </View>
                   </View>
@@ -1450,6 +2300,18 @@ export default function App() {
                           ? "Ingresos"
                           : "Todo"}
                       </Text>
+                    </View>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    className={`${smallBtnBgClass} px-3 py-2 rounded mr-2`}
+                    onPress={() => setShowSearchModal(true)}
+                  >
+                    <View className="flex-row items-center">
+                      <Ionicons
+                        name="search"
+                        size={16}
+                        color={darkMode ? "#fff" : "#111827"}
+                      />
                     </View>
                   </TouchableOpacity>
                   <TouchableOpacity
@@ -1516,15 +2378,17 @@ export default function App() {
                       }`}
                     >
                       {item.tipo === "Ingreso" ? "+" : "-"}{" "}
-                      {item.moneda_original === "USD" ? "$" : "Bs."}{" "}
-                      {parseFloat(item.monto_original).toFixed(2)}
+                      {displayCurrency === "USD" ? "$" : "Bs."}{" "}
+                      {Number(
+                        displayCurrency === "USD"
+                          ? item.monto_usd_registro
+                          : item.monto_ves_registro
+                      ).toFixed(2)}
                     </Text>
                     <Text className="text-gray-500 text-xs text-right">
-                      {item.moneda_original === "USD"
-                        ? `Bs. ${parseFloat(item.monto_ves_registro).toFixed(
-                            2
-                          )}`
-                        : `$ ${parseFloat(item.monto_usd_registro).toFixed(2)}`}
+                      {displayCurrency === "USD"
+                        ? `Bs. ${Number(item.monto_ves_registro).toFixed(2)}`
+                        : `$ ${Number(item.monto_usd_registro).toFixed(2)}`}
                     </Text>
                     {item.tasa_ves_a_usd != null && (
                       <Text className="text-gray-500 text-xs text-right">
@@ -1538,6 +2402,95 @@ export default function App() {
             </View>
           )}
         />
+      )}
+      {activeView === "charts" && (
+        <ScrollView contentContainerStyle={{ paddingBottom: 32 }}>
+          <View className="p-4">
+            <LineEvolutionChart
+                lineChartData={lineChartData}
+                chartPeriod={chartPeriod}
+                setChartPeriod={setChartPeriod}
+                selectedLineIndex={selectedLineIndex}
+                setSelectedLineIndex={setSelectedLineIndex}
+                darkMode={darkMode}
+                textPrimary={textPrimary}
+                textMuted={textMuted}
+                borderMutedClass={borderMutedClass}
+                cardBgClass={cardBgClass}
+                formatUsd={formatUsd}
+                COLOR_GASTOS={COLOR_GASTOS}
+                COLOR_GASTOS_ALT={COLOR_GASTOS_ALT}
+                COLOR_INGRESOS={COLOR_INGRESOS}
+                COLOR_INGRESOS_ALT={COLOR_INGRESOS_ALT}
+              />
+
+            <CategoryTopList
+              categoryChartData={categoryChartData}
+              selectedCategoryIndex={selectedCategoryIndex}
+              setSelectedCategoryIndex={setSelectedCategoryIndex}
+              categoryMaxValue={categoryMaxValue}
+              chartCategoryMode={chartCategoryMode}
+              setChartCategoryMode={setChartCategoryMode}
+              cardBgClass={cardBgClass}
+              textPrimary={textPrimary}
+              textMuted={textMuted}
+              barTrackClass={barTrackClass}
+              darkMode={darkMode}
+              COLOR_GASTOS={COLOR_GASTOS}
+              COLOR_INGRESOS={COLOR_INGRESOS}
+              formatUsd={formatUsd}
+            />
+
+            <DonutCategoriesChart
+              chartPieMode={chartPieMode}
+              setChartPieMode={setChartPieMode}
+              chartPieSegments={chartPieSegments}
+              pieTotal={pieChartData.total}
+              selectedPieIndex={selectedPieIndex}
+              setSelectedPieIndex={setSelectedPieIndex}
+              cardBgClass={cardBgClass}
+              textPrimary={textPrimary}
+              textMuted={textMuted}
+              darkMode={darkMode}
+              formatUsd={formatUsd}
+            />
+
+            <AmountBucketsChart
+              amountBucketData={amountBucketData}
+              selectedBucketIndex={selectedBucketIndex}
+              setSelectedBucketIndex={setSelectedBucketIndex}
+              bucketMaxValue={bucketMaxValue}
+              chartBucketMode={chartBucketMode}
+              setChartBucketMode={setChartBucketMode}
+              cardBgClass={cardBgClass}
+              textPrimary={textPrimary}
+              textMuted={textMuted}
+              barTrackClass={barTrackClass}
+              borderMutedClass={borderMutedClass}
+              darkMode={darkMode}
+              COLOR_GASTOS={COLOR_GASTOS}
+              COLOR_INGRESOS={COLOR_INGRESOS}
+            />
+
+            <HeatmapChart
+              heatmapMatrix={heatmapMatrix}
+              heatmapMax={heatmapMax}
+              chartHeatmapMode={chartHeatmapMode}
+              setChartHeatmapMode={setChartHeatmapMode}
+              selectedHeatmapCell={selectedHeatmapCell}
+              setSelectedHeatmapCell={setSelectedHeatmapCell}
+              WEEKDAY_LABELS={WEEKDAY_LABELS}
+              AMOUNT_BUCKETS={AMOUNT_BUCKETS}
+              cardBgClass={cardBgClass}
+              textPrimary={textPrimary}
+              textMuted={textMuted}
+              darkMode={darkMode}
+              COLOR_GASTOS={COLOR_GASTOS}
+              COLOR_INGRESOS={COLOR_INGRESOS}
+              formatUsd={formatUsd}
+            />
+          </View>
+        </ScrollView>
       )}
       {activeView === "limits" && (
         <ScrollView contentContainerStyle={{ paddingBottom: 32 }}>
@@ -1640,9 +2593,128 @@ export default function App() {
               >
                 <View className="flex-row items-center">
                   <Ionicons name="save" size={18} color="#fff" />
-                  <Text className="text-white" style={{ marginLeft: 6 }}>Guardar Límites</Text>
+                  <Text className="text-white" style={{ marginLeft: 6 }}>
+                    Guardar Límites
+                  </Text>
                 </View>
               </TouchableOpacity>
+            </View>
+          </View>
+        </ScrollView>
+      )}
+      {activeView === "categories" && (
+        <ScrollView contentContainerStyle={{ paddingBottom: 32 }}>
+          <View className="p-4">
+            <Text className={`text-lg font-bold mb-2 ${textPrimary}`}>
+              Categorías
+            </Text>
+            <View className="flex-row justify-center mb-3">
+              <TouchableOpacity
+                className={`mx-1 px-4 py-2 rounded-full border shadow-sm ${
+                  viewMode === "week" ? chipSelectedBgBorder : chipUnselectedBgBorder
+                }`}
+                onPress={() => setViewMode("week")}
+              >
+                <Text
+                  className={
+                    viewMode === "week" ? chipSelectedText : chipUnselectedText
+                  }
+                >
+                  Semana
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                className={`mx-1 px-4 py-2 rounded-full border shadow-sm ${
+                  viewMode === "month" ? chipSelectedBgBorder : chipUnselectedBgBorder
+                }`}
+                onPress={() => setViewMode("month")}
+              >
+                <Text
+                  className={
+                    viewMode === "month" ? chipSelectedText : chipUnselectedText
+                  }
+                >
+                  Mes
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                className={`mx-1 px-4 py-2 rounded-full border shadow-sm ${
+                  viewMode === "year" ? chipSelectedBgBorder : chipUnselectedBgBorder
+                }`}
+                onPress={() => setViewMode("year")}
+              >
+                <Text
+                  className={
+                    viewMode === "year" ? chipSelectedText : chipUnselectedText
+                  }
+                >
+                  Año
+                </Text>
+              </TouchableOpacity>
+            </View>
+            <View className={`rounded-lg p-2 ${cardBgClass}`}>
+              {categoryTotals.length === 0 ? (
+                <Text className={textMuted}>Sin datos para este periodo</Text>
+              ) : (
+                categoryTotals
+                  .slice()
+                  .sort((a, b) => {
+                    const va =
+                      displayCurrency === "USD"
+                        ? Number(a.totalUSD || 0)
+                        : Number(a.totalVES || 0);
+                    const vb =
+                      displayCurrency === "USD"
+                        ? Number(b.totalUSD || 0)
+                        : Number(b.totalVES || 0);
+                    return vb - va;
+                  })
+                  .map((row) => {
+                    const color = getCategoryColor(row.categoria, "Gasto");
+                    const icon = getCategoryIcon(row.categoria, "Gasto");
+                    const maxVal = Math.max(
+                      0,
+                      ...categoryTotals.map((r) =>
+                        Number(
+                          displayCurrency === "USD"
+                            ? r.totalUSD || 0
+                            : r.totalVES || 0
+                        )
+                      )
+                    );
+                    const val = Number(
+                      displayCurrency === "USD"
+                        ? row.totalUSD || 0
+                        : row.totalVES || 0
+                    );
+                    const pct = maxVal > 0 ? Math.min(100, (val / maxVal) * 100) : 0;
+                    return (
+                      <View key={`catbar-${row.categoria}`} className="mb-3">
+                        <View className="flex-row items-center mb-1">
+                          <Ionicons name={icon} size={18} color={color} />
+                          <Text className={`ml-2 ${textPrimary}`}>
+                            {row.categoria}
+                          </Text>
+                          <Text className={`ml-auto ${textPrimary}`}>
+                            {displayCurrency === "USD"
+                              ? `$ ${Number(row.totalUSD || 0).toFixed(2)}`
+                              : `Bs. ${Number(row.totalVES || 0).toFixed(2)}`}
+                          </Text>
+                        </View>
+                        <View className={`h-3 rounded-full ${barTrackClass}`}>
+                          <View
+                            style={{
+                              width: `${pct}%`,
+                              backgroundColor: color,
+                              height: "100%",
+                              borderRadius: 9999,
+                            }}
+                          />
+                        </View>
+                      </View>
+                    );
+                  })
+              )}
             </View>
           </View>
         </ScrollView>
@@ -1653,14 +2725,18 @@ export default function App() {
             {!selectedCredit ? (
               <>
                 <View className="flex-row justify-between items-center mb-2">
-                  <Text className={`text-lg font-bold ${textPrimary}`}>Créditos</Text>
+                  <Text className={`text-lg font-bold ${textPrimary}`}>
+                    Créditos
+                  </Text>
                   <TouchableOpacity
                     className={`${accentBtnClass} px-4 py-2 rounded`}
                     onPress={() => setShowCreateCreditModal(true)}
                   >
                     <View className="flex-row items-center">
                       <Ionicons name="add" size={18} color="#fff" />
-                      <Text className="text-white" style={{ marginLeft: 6 }}>Nuevo</Text>
+                      <Text className="text-white" style={{ marginLeft: 6 }}>
+                        Nuevo
+                      </Text>
                     </View>
                   </TouchableOpacity>
                 </View>
@@ -1674,13 +2750,29 @@ export default function App() {
                       onPress={() => openCredit(c)}
                     >
                       <View className="flex-row items-center">
-                        <Ionicons name="card" size={18} color={darkMode ? "#93c5fd" : "#2563eb"} />
-                        <Text className={`ml-2 font-medium ${textPrimary}`}>{c.nombre}</Text>
-                        <Text className={`ml-auto ${textMuted}`}>{c.cuotas_pagadas}/{c.cuotas_total}</Text>
+                        <Ionicons
+                          name="card"
+                          size={18}
+                          color={darkMode ? "#93c5fd" : "#2563eb"}
+                        />
+                        <Text className={`ml-2 font-medium ${textPrimary}`}>
+                          {c.nombre}
+                        </Text>
+                        <Text className={`ml-auto ${textMuted}`}>
+                          {c.cuotas_pagadas}/{c.cuotas_total}
+                        </Text>
                       </View>
                       <View className="flex-row justify-between mt-1">
-                        <Text className={`${textMuted} text-xs`}>Creado: {formatearFecha(c.fecha_creacion)}</Text>
-                        <Text className={`text-xs ${c.estado === 'pagado' ? 'text-green-600' : textMuted}`}>{c.estado || 'activo'}</Text>
+                        <Text className={`${textMuted} text-xs`}>
+                          Creado: {formatearFecha(c.fecha_creacion)}
+                        </Text>
+                        <Text
+                          className={`text-xs ${
+                            c.estado === "pagado" ? "text-green-600" : textMuted
+                          }`}
+                        >
+                          {c.estado || "activo"}
+                        </Text>
                       </View>
                     </TouchableOpacity>
                   ))
@@ -1689,52 +2781,108 @@ export default function App() {
             ) : (
               <>
                 <View className="flex-row justify-between items-center mb-2">
-                  <TouchableOpacity className={`${smallBtnBgClass} px-3 py-2 rounded`} onPress={backToCreditsList}>
+                  <TouchableOpacity
+                    className={`${smallBtnBgClass} px-3 py-2 rounded`}
+                    onPress={backToCreditsList}
+                  >
                     <View className="flex-row items-center">
-                      <Ionicons name="arrow-back" size={16} color={darkMode ? '#fff' : '#111827'} />
-                      <Text className={textPrimary} style={{ marginLeft: 6 }}>Volver</Text>
+                      <Ionicons
+                        name="arrow-back"
+                        size={16}
+                        color={darkMode ? "#fff" : "#111827"}
+                      />
+                      <Text className={textPrimary} style={{ marginLeft: 6 }}>
+                        Volver
+                      </Text>
                     </View>
                   </TouchableOpacity>
-                  <Text className={`text-lg font-bold ${textPrimary}`}>{selectedCredit.nombre}</Text>
+                  <Text className={`text-lg font-bold ${textPrimary}`}>
+                    {selectedCredit.nombre}
+                  </Text>
                   <View style={{ width: 80 }} />
                 </View>
                 <View className={`p-3 mb-2 rounded-lg shadow ${cardBgClass}`}>
                   <View className="flex-row justify-between">
                     <Text className={textPrimary}>Cuotas</Text>
-                    <Text className={textMuted}>{creditInstallments.filter(i=>i.estado==='pagado').length}/{creditInstallments.length}</Text>
+                    <Text className={textMuted}>
+                      {
+                        creditInstallments.filter((i) => i.estado === "pagado")
+                          .length
+                      }
+                      /{creditInstallments.length}
+                    </Text>
                   </View>
                 </View>
                 {creditInstallments.map((i) => (
-                  <View key={i.id} className={`p-3 mb-2 rounded-lg shadow ${cardBgClass}`}>
+                  <View
+                    key={i.id}
+                    className={`p-3 mb-2 rounded-lg shadow ${cardBgClass}`}
+                  >
                     <View className="flex-row items-center justify-between">
                       <View className="flex-row items-center">
-                        {i.estado === 'pagado' ? (
-                          <Ionicons name="checkbox" size={18} color={darkMode ? '#34d399' : '#059669'} />
+                        {i.estado === "pagado" ? (
+                          <Ionicons
+                            name="checkbox"
+                            size={18}
+                            color={darkMode ? "#34d399" : "#059669"}
+                          />
                         ) : (
-                          <TouchableOpacity onPress={() => toggleInstallmentSelection(i.id)}>
-                            <Ionicons name={selectedInstallments[i.id] ? 'checkbox' : 'square-outline'} size={18} color={darkMode ? '#fff' : '#111827'} />
+                          <TouchableOpacity
+                            onPress={() => toggleInstallmentSelection(i.id)}
+                          >
+                            <Ionicons
+                              name={
+                                selectedInstallments[i.id]
+                                  ? "checkbox"
+                                  : "square-outline"
+                              }
+                              size={18}
+                              color={darkMode ? "#fff" : "#111827"}
+                            />
                           </TouchableOpacity>
                         )}
-                        <Text className={`ml-2 ${textPrimary}`}>Cuota #{i.numero}</Text>
+                        <Text className={`ml-2 ${textPrimary}`}>
+                          Cuota #{i.numero}
+                        </Text>
                       </View>
                       <View className="items-end">
-                        <Text className={textPrimary}>$ {Number(i.monto_usd || 0).toFixed(2)}</Text>
-                        <Text className={`${textMuted} text-xs`}>{i.estado === 'pagado' ? 'Pagada' : `Vence: ${formatearFecha(i.fecha_programada)}`}</Text>
+                        <Text className={textPrimary}>
+                          $ {Number(i.monto_usd || 0).toFixed(2)}
+                        </Text>
+                        <Text className={`${textMuted} text-xs`}>
+                          {i.estado === "pagado"
+                            ? "Pagada"
+                            : `Vence: ${formatearFecha(i.fecha_programada)}`}
+                        </Text>
                       </View>
                     </View>
                   </View>
                 ))}
                 <View className="flex-row justify-between mt-2">
-                  <TouchableOpacity className={`${smallBtnBgClass} px-4 py-2 rounded`} onPress={() => paySelectedInstallments(false)}>
+                  <TouchableOpacity
+                    className={`${smallBtnBgClass} px-4 py-2 rounded`}
+                    onPress={() => paySelectedInstallments(false)}
+                  >
                     <View className="flex-row items-center">
-                      <Ionicons name="cash" size={16} color={darkMode ? '#fff' : '#111827'} />
-                      <Text className={textPrimary} style={{ marginLeft: 6 }}>Pagar seleccionadas</Text>
+                      <Ionicons
+                        name="cash"
+                        size={16}
+                        color={darkMode ? "#fff" : "#111827"}
+                      />
+                      <Text className={textPrimary} style={{ marginLeft: 6 }}>
+                        Pagar seleccionadas
+                      </Text>
                     </View>
                   </TouchableOpacity>
-                  <TouchableOpacity className={`${accentBtnClass} px-4 py-2 rounded`} onPress={() => paySelectedInstallments(true)}>
+                  <TouchableOpacity
+                    className={`${accentBtnClass} px-4 py-2 rounded`}
+                    onPress={() => paySelectedInstallments(true)}
+                  >
                     <View className="flex-row items-center">
                       <Ionicons name="checkmark-done" size={18} color="#fff" />
-                      <Text className="text-white" style={{ marginLeft: 6 }}>Pagar todas</Text>
+                      <Text className="text-white" style={{ marginLeft: 6 }}>
+                        Pagar todas
+                      </Text>
                     </View>
                   </TouchableOpacity>
                 </View>
@@ -1744,128 +2892,63 @@ export default function App() {
         </ScrollView>
       )}
 
-      <Modal visible={showTasaModal} animationType="slide" transparent>
-        <View className="flex-1 justify-center items-center bg-black/50">
-          <View className={`${modalBgClass} p-6 rounded-lg w-4/5`}>
-            <Text className={`text-lg font-bold mb-4 ${textPrimary}`}>
-              Tasa de Cambio del Día
-            </Text>
-            <Text className={`mb-2 ${textPrimary}`}>
-              Ingrese la tasa Bs. por $1 USD:
-            </Text>
-            <TextInput
-              className={`border rounded p-2 mb-4 ${inputBgClass} ${inputBorderClass} ${inputTextClass}`}
-              placeholder="Ej: 36.50"
-              placeholderTextColor={placeholderColor}
-              keyboardType="numeric"
-              value={tasaDolar}
-              onChangeText={setTasaDolar}
-            />
-            <TouchableOpacity
-              className={`${accentBtnClass} p-3 rounded items-center`}
-              onPress={guardarTasaDia}
-            >
-              <Text className="text-white font-medium">Guardar Tasa</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
+      <TasaDelDiaModal
+        visible={showTasaModal}
+        tasaDolar={tasaDolar}
+        setTasaDolar={setTasaDolar}
+        onSave={guardarTasaDia}
+        modalBgClass={modalBgClass}
+        inputBgClass={inputBgClass}
+        inputBorderClass={inputBorderClass}
+        inputTextClass={inputTextClass}
+        placeholderColor={placeholderColor}
+        accentBtnClass={accentBtnClass}
+        textPrimary={textPrimary}
+        darkMode={darkMode}
+        fetchingAuto={isFetchingOfficialRate}
+        onFetchAuto={fetchOfficialRate}
+        fetchError={officialRateError}
+      />
 
-      <Modal visible={showCreateCreditModal} animationType="slide" transparent>
-        <View className="flex-1 justify-center items-center bg-black/50">
-          <View className={`${modalBgClass} p-6 rounded-lg w-4/5`}>
-            <Text className={`text-lg font-bold mb-4 ${textPrimary}`}>Nuevo Crédito</Text>
-            <ScrollView style={{ maxHeight: 420 }}>
-              <Text className={`${textMuted} mb-1`}>Nombre</Text>
-              <TextInput
-                className={`border rounded p-2 mb-3 ${inputBgClass} ${inputBorderClass} ${inputTextClass}`}
-                placeholder="Identificador"
-                placeholderTextColor={placeholderColor}
-                value={newCredit.nombre}
-                onChangeText={(t) => setNewCredit((p) => ({ ...p, nombre: t }))}
-              />
+      <CreateCreditModal
+        visible={showCreateCreditModal}
+        newCredit={newCredit}
+        setNewCredit={setNewCredit}
+        onCancel={() => setShowCreateCreditModal(false)}
+        onCreate={createCredit}
+        darkMode={darkMode}
+        modalBgClass={modalBgClass}
+        textPrimary={textPrimary}
+        textMuted={textMuted}
+        inputBgClass={inputBgClass}
+        inputBorderClass={inputBorderClass}
+        inputTextClass={inputTextClass}
+        placeholderColor={placeholderColor}
+        smallBtnBgClass={smallBtnBgClass}
+        accentBtnClass={accentBtnClass}
+        chipSelectedBgBorder={chipSelectedBgBorder}
+        chipUnselectedBgBorder={chipUnselectedBgBorder}
+        chipSelectedText={chipSelectedText}
+        chipUnselectedText={chipUnselectedText}
+        planDays={CREDIT_PLAN_DAYS}
+      />
 
-              <Text className={`${textMuted} mb-1`}>Monto Total ($)</Text>
-              <TextInput
-                className={`border rounded p-2 mb-3 ${inputBgClass} ${inputBorderClass} ${inputTextClass}`}
-                placeholder="0.00"
-                placeholderTextColor={placeholderColor}
-                keyboardType="numeric"
-                value={newCredit.montoTotalUsd}
-                onChangeText={(t) => setNewCredit((p) => ({ ...p, montoTotalUsd: t }))}
-              />
-
-              <Text className={`${textMuted} mb-1`}>Inicial ($)</Text>
-              <TextInput
-                className={`border rounded p-2 mb-3 ${inputBgClass} ${inputBorderClass} ${inputTextClass}`}
-                placeholder="0.00"
-                placeholderTextColor={placeholderColor}
-                keyboardType="numeric"
-                value={newCredit.inicialUsd}
-                onChangeText={(t) => setNewCredit((p) => ({ ...p, inicialUsd: t }))}
-              />
-
-              <View className="flex-row -mx-1">
-                <View className="w-1/2 px-1">
-                  <Text className={`${textMuted} mb-1`}>Cantidad de cuotas</Text>
-                  <TextInput
-                    className={`border rounded p-2 mb-3 ${inputBgClass} ${inputBorderClass} ${inputTextClass}`}
-                    placeholder="0"
-                    placeholderTextColor={placeholderColor}
-                    keyboardType="numeric"
-                    value={newCredit.cuotasCantidad}
-                    onChangeText={(t) => setNewCredit((p) => ({ ...p, cuotasCantidad: t }))}
-                  />
-                </View>
-                <View className="w-1/2 px-1">
-                  <Text className={`${textMuted} mb-1`}>Monto por cuota ($)</Text>
-                  <TextInput
-                    className={`border rounded p-2 mb-3 ${inputBgClass} ${inputBorderClass} ${inputTextClass}`}
-                    placeholder="0.00"
-                    placeholderTextColor={placeholderColor}
-                    keyboardType="numeric"
-                    value={newCredit.montoCuotaUsd}
-                    onChangeText={(t) => setNewCredit((p) => ({ ...p, montoCuotaUsd: t }))}
-                  />
-                </View>
-              </View>
-
-              <Text className={`${textMuted} mb-1`}>Plan de pago (días)</Text>
-              <View className="flex-row -mx-1 mb-2">
-                {[7, 15, 21, 28].map((d) => (
-                  <View key={d} className="w-1/4 px-1">
-                    <TouchableOpacity
-                      className={`p-2 rounded border items-center ${
-                        Number(newCredit.planDias) === d ? chipSelectedBgBorder : chipUnselectedBgBorder
-                      }`}
-                      onPress={() => setNewCredit((p) => ({ ...p, planDias: d }))}
-                    >
-                      <Text className={Number(newCredit.planDias) === d ? chipSelectedText : chipUnselectedText}>{d}</Text>
-                    </TouchableOpacity>
-                  </View>
-                ))}
-              </View>
-            </ScrollView>
-            <View className="flex-row justify-between mt-3">
-              <TouchableOpacity className={`${smallBtnBgClass} px-4 py-2 rounded`} onPress={() => setShowCreateCreditModal(false)}>
-                <View className="flex-row items-center">
-                  <Ionicons name="close" size={16} color={darkMode ? '#fff' : '#111827'} />
-                  <Text className={textPrimary} style={{ marginLeft: 6 }}>Cancelar</Text>
-                </View>
-              </TouchableOpacity>
-              <TouchableOpacity className={`${accentBtnClass} px-4 py-2 rounded`} onPress={createCredit}>
-                <View className="flex-row items-center">
-                  <Ionicons name="save" size={18} color="#fff" />
-                  <Text className="text-white" style={{ marginLeft: 6 }}>Crear crédito</Text>
-                </View>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
       <Modal visible={showDrawer} animationType="fade" transparent>
         <View className="flex-1 flex-row">
           <View className={`${modalBgClass} w-64 h-full p-6`}>
+            <View className="items-center mb-4">
+              <Image
+                source={require("./assets/images/logo.png")}
+                style={{ width: 96, height: 96 }}
+                resizeMode="contain"
+              />
+              <Text
+                className={`text-xl font-bold mt-2 ${textPrimary}`}
+                style={{ fontFamily: fontsLoaded ? "Righteous_400Regular" : undefined }}
+              >
+                ANZU
+              </Text>
+            </View>
             <Text className={`text-lg font-bold mb-4 ${textPrimary}`}>
               Menú
             </Text>
@@ -1879,9 +2962,84 @@ export default function App() {
               }}
             >
               <View className="flex-row items-center">
-                <Ionicons name="home" size={18} color={activeView === "home" ? '#fff' : (darkMode ? '#fff' : '#111827')} />
-                <Text className={activeView === "home" ? "text-white" : textPrimary} style={{ marginLeft: 8 }}>
+                <Ionicons
+                  name="home"
+                  size={18}
+                  color={
+                    activeView === "home"
+                      ? "#fff"
+                      : darkMode
+                      ? "#fff"
+                      : "#111827"
+                  }
+                />
+                <Text
+                  className={activeView === "home" ? "text-white" : textPrimary}
+                  style={{ marginLeft: 8 }}
+                >
                   Home
+                </Text>
+              </View>
+            </TouchableOpacity>
+            <TouchableOpacity
+              className={`mb-2 p-3 rounded ${
+                activeView === "charts" ? accentBtnClass : smallBtnBgClass
+              }`}
+              onPress={() => {
+                setActiveView("charts");
+                setShowDrawer(false);
+              }}
+            >
+              <View className="flex-row items-center">
+                <Ionicons
+                  name="analytics"
+                  size={18}
+                  color={
+                    activeView === "charts"
+                      ? "#fff"
+                      : darkMode
+                      ? "#fff"
+                      : "#111827"
+                  }
+                />
+                <Text
+                  className={
+                    activeView === "charts" ? "text-white" : textPrimary
+                  }
+                  style={{ marginLeft: 8 }}
+                >
+                  Gráficos
+                </Text>
+              </View>
+            </TouchableOpacity>
+            <TouchableOpacity
+              className={`mb-2 p-3 rounded ${
+                activeView === "categories" ? accentBtnClass : smallBtnBgClass
+              }`}
+              onPress={() => {
+                setActiveView("categories");
+                setShowDrawer(false);
+              }}
+            >
+              <View className="flex-row items-center">
+                <Ionicons
+                  name="pricetags"
+                  size={18}
+                  color={
+                    activeView === "categories"
+                      ? "#fff"
+                      : darkMode
+                      ? "#fff"
+                      : "#111827"
+                  }
+                />
+                <Text
+                  className={
+                    activeView === "categories" ? "text-white" : textPrimary
+                  }
+                  style={{ marginLeft: 8 }}
+                >
+                  Categorías
                 </Text>
               </View>
             </TouchableOpacity>
@@ -1895,8 +3053,23 @@ export default function App() {
               }}
             >
               <View className="flex-row items-center">
-                <Ionicons name="speedometer" size={18} color={activeView === "limits" ? '#fff' : (darkMode ? '#fff' : '#111827')} />
-                <Text className={activeView === "limits" ? "text-white" : textPrimary} style={{ marginLeft: 8 }}>
+                <Ionicons
+                  name="speedometer"
+                  size={18}
+                  color={
+                    activeView === "limits"
+                      ? "#fff"
+                      : darkMode
+                      ? "#fff"
+                      : "#111827"
+                  }
+                />
+                <Text
+                  className={
+                    activeView === "limits" ? "text-white" : textPrimary
+                  }
+                  style={{ marginLeft: 8 }}
+                >
                   Límites
                 </Text>
               </View>
@@ -1911,9 +3084,63 @@ export default function App() {
               }}
             >
               <View className="flex-row items-center">
-                <Ionicons name="card" size={18} color={activeView === "credits" ? '#fff' : (darkMode ? '#fff' : '#111827')} />
-                <Text className={activeView === "credits" ? "text-white" : textPrimary} style={{ marginLeft: 8 }}>
+                <Ionicons
+                  name="card"
+                  size={18}
+                  color={
+                    activeView === "credits"
+                      ? "#fff"
+                      : darkMode
+                      ? "#fff"
+                      : "#111827"
+                  }
+                />
+                <Text
+                  className={
+                    activeView === "credits" ? "text-white" : textPrimary
+                  }
+                  style={{ marginLeft: 8 }}
+                >
                   Créditos
+                </Text>
+              </View>
+            </TouchableOpacity>
+            <TouchableOpacity
+              className={`mb-2 p-3 rounded ${smallBtnBgClass}`}
+              onPress={async () => {
+                await checkTasaDia();
+                setOfficialRateError(null);
+                setShowTasaModal(true);
+                setShowDrawer(false);
+              }}
+            >
+              <View className="flex-row items-center">
+                <Ionicons
+                  name="cash"
+                  size={18}
+                  color={darkMode ? "#fff" : "#111827"}
+                />
+                <Text className={textPrimary} style={{ marginLeft: 8 }}>
+                  Tasa del día
+                </Text>
+              </View>
+            </TouchableOpacity>
+            <TouchableOpacity
+              className={`mb-2 p-3 rounded ${smallBtnBgClass}`}
+              onPress={() => {
+                setShowDataModal(true);
+                setShowDrawer(false);
+              }}
+              disabled={backupBusy}
+            >
+              <View className="flex-row items-center">
+                <Ionicons
+                  name="save"
+                  size={18}
+                  color={darkMode ? "#fff" : "#111827"}
+                />
+                <Text className={textPrimary} style={{ marginLeft: 8 }}>
+                  Datos
                 </Text>
               </View>
             </TouchableOpacity>
@@ -1924,217 +3151,91 @@ export default function App() {
           />
         </View>
       </Modal>
+      <AddTransactionModal
+        visible={showAddModal}
+        newTransaction={newTransaction}
+        setNewTransaction={setNewTransaction}
+        onCancel={() => setShowAddModal(false)}
+        onSave={agregarTransaccion}
+        CATEGORIES={CATEGORIES}
+        darkMode={darkMode}
+        modalBgClass={modalBgClass}
+        textPrimary={textPrimary}
+        textMuted={textMuted}
+        inputBgClass={inputBgClass}
+        inputBorderClass={inputBorderClass}
+        inputTextClass={inputTextClass}
+        placeholderColor={placeholderColor}
+        smallBtnBgClass={smallBtnBgClass}
+        minorBtnBgClass={minorBtnBgClass}
+        accentBtnClass={accentBtnClass}
+        chipSelectedBgBorder={chipSelectedBgBorder}
+        chipUnselectedBgBorder={chipUnselectedBgBorder}
+        chipSelectedText={chipSelectedText}
+        chipUnselectedText={chipUnselectedText}
+      />
+      <DataModal
+        visible={showDataModal}
+        backupBusy={backupBusy}
+        backupMessage={backupMessage}
+        exportDatabase={exportDatabase}
+        importDatabase={importDatabase}
+        onClose={() => {
+          if (!backupBusy) setShowDataModal(false);
+        }}
+        darkMode={darkMode}
+        modalBgClass={modalBgClass}
+        accentBtnClass={accentBtnClass}
+        smallBtnBgClass={smallBtnBgClass}
+        minorBtnBgClass={minorBtnBgClass}
+        textPrimary={textPrimary}
+        textMuted={textMuted}
+      />
+      <SearchTransactionsModal
+        visible={showSearchModal}
+        searchDescription={searchDescription}
+        setSearchDescription={setSearchDescription}
+        searchMinAmount={searchMinAmount}
+        setSearchMinAmount={setSearchMinAmount}
+        searchMaxAmount={searchMaxAmount}
+        setSearchMaxAmount={setSearchMaxAmount}
+        searchStartDate={searchStartDate}
+        setSearchStartDate={setSearchStartDate}
+        searchEndDate={searchEndDate}
+        setSearchEndDate={setSearchEndDate}
+        onClean={resetTransactionSearch}
+        onCancel={() => setShowSearchModal(false)}
+        onApply={applyTransactionSearch}
+        modalBgClass={modalBgClass}
+        inputBgClass={inputBgClass}
+        inputBorderClass={inputBorderClass}
+        inputTextClass={inputTextClass}
+        placeholderColor={placeholderColor}
+        minorBtnBgClass={minorBtnBgClass}
+        smallBtnBgClass={smallBtnBgClass}
+        accentBtnClass={accentBtnClass}
+        textPrimary={textPrimary}
+        textMuted={textMuted}
+        darkMode={darkMode}
+      />
+      <MonthPickerModal
+        visible={showMonthModal}
+        tempYear={tempYear}
+        setTempYear={setTempYear}
+        tempMonthIndex={tempMonthIndex}
+        setTempMonthIndex={setTempMonthIndex}
+        MONTHS={MONTHS}
+        onCancel={() => setShowMonthModal(false)}
+        onApply={() => {
+          const ym = `${tempYear}-${pad2(tempMonthIndex + 1)}`;
+          setCurrentMonth(ym);
+          setShowMonthModal(false);
+        }}
+        modalBgClass={modalBgClass}
+        accentBtnClass={accentBtnClass}
+        darkMode={darkMode}
+      />
 
-      <Modal visible={showAddModal} animationType="slide" transparent>
-        <View className="flex-1 justify-center items-center bg-black/50">
-          <View className={`${modalBgClass} p-6 rounded-lg w-4/5`}>
-            <Text className={`text-lg font-bold mb-4 ${textPrimary}`}>
-              Nueva Transacción
-            </Text>
-
-            <View className="flex-row justify-around mb-4">
-              <TouchableOpacity
-                className={`px-4 py-2 rounded ${
-                  newTransaction.tipo === "Gasto" ? "bg-red-500" : "bg-gray-200"
-                }`}
-                onPress={() =>
-                  setNewTransaction({
-                    ...newTransaction,
-                    tipo: "Gasto",
-                    categoria: newTransaction.categoria ?? "COMIDA",
-                  })
-                }
-              >
-                <Text
-                  className={
-                    newTransaction.tipo === "Gasto"
-                      ? "text-white"
-                      : "text-gray-700"
-                  }
-                >
-                  Gasto
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                className={`px-4 py-2 rounded ${
-                  newTransaction.tipo === "Ingreso"
-                    ? "bg-green-500"
-                    : "bg-gray-200"
-                }`}
-                onPress={() =>
-                  setNewTransaction({
-                    ...newTransaction,
-                    tipo: "Ingreso",
-                    categoria: null,
-                  })
-                }
-              >
-                <Text
-                  className={
-                    newTransaction.tipo === "Ingreso"
-                      ? "text-white"
-                      : "text-gray-700"
-                  }
-                >
-                  Ingreso
-                </Text>
-              </TouchableOpacity>
-            </View>
-
-            <TextInput
-              className={`border rounded p-2 mb-3 ${inputBgClass} ${inputBorderClass} ${inputTextClass}`}
-              placeholder="Descripción"
-              placeholderTextColor={placeholderColor}
-              value={newTransaction.descripcion}
-              onChangeText={(text) =>
-                setNewTransaction({ ...newTransaction, descripcion: text })
-              }
-            />
-
-            <View className="flex-row mb-3">
-              <TextInput
-                className={`border rounded-l p-2 flex-1 ${inputBgClass} ${inputBorderClass} ${inputTextClass}`}
-                placeholder="Monto"
-                placeholderTextColor={placeholderColor}
-                keyboardType="numeric"
-                value={newTransaction.monto}
-                onChangeText={(text) =>
-                  setNewTransaction({ ...newTransaction, monto: text })
-                }
-              />
-              <View
-                className={`border-t border-b border-r rounded-r overflow-hidden ${inputBorderClass}`}
-              >
-                <TouchableOpacity
-                  className={`px-3 py-2 ${smallBtnBgClass}`}
-                  onPress={() =>
-                    setNewTransaction({
-                      ...newTransaction,
-                      moneda: newTransaction.moneda === "USD" ? "VES" : "USD",
-                    })
-                  }
-                >
-                  <Text className={textPrimary}>{newTransaction.moneda}</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-
-            {newTransaction.tipo === "Gasto" && (
-              <>
-                <Text className={`font-medium mb-2 ${textPrimary}`}>
-                  Categoría
-                </Text>
-                <View className="flex-row flex-wrap -m-1 mb-3">
-                  {CATEGORIES.map((cat) => (
-                    <TouchableOpacity
-                      key={cat}
-                      className={`m-1 px-3 py-2 rounded border ${
-                        newTransaction.categoria === cat
-                          ? chipSelectedBgBorder
-                          : chipUnselectedBgBorder
-                      }`}
-                      onPress={() =>
-                        setNewTransaction({ ...newTransaction, categoria: cat })
-                      }
-                    >
-                      <Text
-                        className={
-                          newTransaction.categoria === cat
-                            ? chipSelectedText
-                            : chipUnselectedText
-                        }
-                      >
-                        {cat}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-              </>
-            )}
-
-            <View className="flex-row justify-between mt-4">
-              <TouchableOpacity
-                className={`${minorBtnBgClass} px-4 py-2 rounded`}
-                onPress={() => setShowAddModal(false)}
-              >
-                <Text>Cancelar</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                className={`${accentBtnClass} px-4 py-2 rounded`}
-                onPress={agregarTransaccion}
-              >
-                <Text className="text-white">Guardar</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
-      <Modal visible={showMonthModal} animationType="slide" transparent>
-        <View className="flex-1 justify-center items-center bg-black/50">
-          <View className={`${modalBgClass} p-6 rounded-lg w-11/12`}>
-            <View className="flex-row justify-between items-center mb-4">
-              <TouchableOpacity
-                className="px-3 py-1 rounded bg-gray-100"
-                onPress={() => setTempYear(tempYear - 1)}
-              >
-                <Text>{`<`}</Text>
-              </TouchableOpacity>
-              <Text className="text-lg font-bold">{tempYear}</Text>
-              <TouchableOpacity
-                className="px-3 py-1 rounded bg-gray-100"
-                onPress={() => setTempYear(tempYear + 1)}
-              >
-                <Text>{`>`}</Text>
-              </TouchableOpacity>
-            </View>
-            <View className="flex-row flex-wrap -mx-1">
-              {MONTHS.map((m, idx) => (
-                <TouchableOpacity
-                  key={m}
-                  className="w-1/3 p-1"
-                  onPress={() => setTempMonthIndex(idx)}
-                >
-                  <View
-                    className={`rounded border p-3 items-center ${
-                      tempMonthIndex === idx
-                        ? "bg-blue-100 border-blue-500"
-                        : "bg-gray-50 border-gray-300"
-                    }`}
-                  >
-                    <Text
-                      className={
-                        tempMonthIndex === idx
-                          ? "text-blue-700"
-                          : "text-gray-700"
-                      }
-                    >
-                      {m}
-                    </Text>
-                  </View>
-                </TouchableOpacity>
-              ))}
-            </View>
-            <View className="flex-row justify-between mt-4">
-              <TouchableOpacity
-                className="bg-gray-300 px-4 py-2 rounded"
-                onPress={() => setShowMonthModal(false)}
-              >
-                <Text>Cancelar</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                className={`${accentBtnClass} px-4 py-2 rounded`}
-                onPress={() => {
-                  const ym = `${tempYear}-${pad2(tempMonthIndex + 1)}`;
-                  setCurrentMonth(ym);
-                  setShowMonthModal(false);
-                }}
-              >
-                <Text className="text-white">Aplicar</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
     </SafeAreaView>
   );
 }
