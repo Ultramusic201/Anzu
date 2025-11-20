@@ -2,8 +2,14 @@
 // Presentational-only. Parent controls visibility/state and actions.
 
 import React from "react";
-import { Modal, View, Text, TextInput, TouchableOpacity, StyleSheet } from "react-native";
-import { Ionicons } from "@expo/vector-icons";
+import {
+  Modal,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+} from "react-native";
 
 /**
  * @param {Object} props
@@ -51,6 +57,7 @@ export default function AddTransactionModal({
   chipUnselectedBgBorder,
   chipSelectedText,
   chipUnselectedText,
+  title = "Nueva Transacción",
 }) {
   const isExpense = newTransaction.tipo === "Gasto";
   const isIncome = newTransaction.tipo === "Ingreso";
@@ -70,21 +77,38 @@ export default function AddTransactionModal({
   const chipInactiveBorder = borderColor;
   const chipInactiveBg = surfaceSubtle;
   const chipInactiveText = mutedColor;
-
+  const sortedCategories = React.useMemo(
+    () =>
+      [...CATEGORIES].sort((a, b) =>
+        a.localeCompare(b, "es", { sensitivity: "base" })
+      ),
+    [CATEGORIES]
+  );
   return (
     <Modal visible={visible} animationType="slide" transparent>
       <View style={styles.overlay}>
         <View
           className={`${modalBgClass} rounded-lg`}
-          style={[styles.card, darkMode ? styles.cardDark : styles.cardLight, styles.cardShadow]}
+          style={[
+            styles.card,
+            darkMode ? styles.cardDark : styles.cardLight,
+            styles.cardShadow,
+          ]}
         >
-          <Text className={`text-lg font-bold mb-4 ${textPrimary}`} style={[styles.titleText, { color: primaryColor }]}>Nueva Transacción</Text>
+          <Text
+            className={`text-lg font-bold mb-4 ${textPrimary}`}
+            style={[styles.titleText, { color: primaryColor }]}
+          >
+            {title}
+          </Text>
 
           <View style={styles.toggleRow}>
             <TouchableOpacity
               style={[
                 styles.toggleButton,
-                { backgroundColor: isExpense ? expenseColor : inactiveToggleBg },
+                {
+                  backgroundColor: isExpense ? expenseColor : inactiveToggleBg,
+                },
               ]}
               onPress={() =>
                 setNewTransaction({
@@ -95,8 +119,15 @@ export default function AddTransactionModal({
               }
             >
               <Text
-                className={newTransaction.tipo === "Gasto" ? "text-white" : "text-gray-700"}
-                style={[styles.toggleLabel, { color: isExpense ? "#FFFFFF" : inactiveToggleText }]}
+                className={
+                  newTransaction.tipo === "Gasto"
+                    ? "text-white"
+                    : "text-gray-700"
+                }
+                style={[
+                  styles.toggleLabel,
+                  { color: isExpense ? "#FFFFFF" : inactiveToggleText },
+                ]}
               >
                 Gasto
               </Text>
@@ -115,8 +146,15 @@ export default function AddTransactionModal({
               }
             >
               <Text
-                className={newTransaction.tipo === "Ingreso" ? "text-white" : "text-gray-700"}
-                style={[styles.toggleLabel, { color: isIncome ? "#FFFFFF" : inactiveToggleText }]}
+                className={
+                  newTransaction.tipo === "Ingreso"
+                    ? "text-white"
+                    : "text-gray-700"
+                }
+                style={[
+                  styles.toggleLabel,
+                  { color: isIncome ? "#FFFFFF" : inactiveToggleText },
+                ]}
               >
                 Ingreso
               </Text>
@@ -128,8 +166,17 @@ export default function AddTransactionModal({
             placeholder="Descripción"
             placeholderTextColor={placeholderColor}
             value={newTransaction.descripcion}
-            onChangeText={(text) => setNewTransaction({ ...newTransaction, descripcion: text })}
-            style={[styles.input, { backgroundColor: surfaceSubtle, borderColor, color: primaryColor }]}
+            onChangeText={(text) =>
+              setNewTransaction({ ...newTransaction, descripcion: text })
+            }
+            style={[
+              styles.input,
+              {
+                backgroundColor: surfaceSubtle,
+                borderColor,
+                color: primaryColor,
+              },
+            ]}
           />
 
           <View style={styles.amountRow}>
@@ -139,8 +186,17 @@ export default function AddTransactionModal({
               placeholderTextColor={placeholderColor}
               keyboardType="numeric"
               value={newTransaction.monto}
-              onChangeText={(text) => setNewTransaction({ ...newTransaction, monto: text })}
-              style={[styles.amountInput, { backgroundColor: surfaceSubtle, borderColor, color: primaryColor }]}
+              onChangeText={(text) =>
+                setNewTransaction({ ...newTransaction, monto: text })
+              }
+              style={[
+                styles.amountInput,
+                {
+                  backgroundColor: surfaceSubtle,
+                  borderColor,
+                  color: primaryColor,
+                },
+              ]}
             />
             <View
               className={`border-t border-b border-r rounded-r overflow-hidden ${inputBorderClass}`}
@@ -156,7 +212,10 @@ export default function AddTransactionModal({
                 }
                 style={[styles.currencyButton, { backgroundColor: currencyBg }]}
               >
-                <Text className={textPrimary} style={{ color: primaryColor, fontWeight: "600" }}>
+                <Text
+                  className={textPrimary}
+                  style={{ color: primaryColor, fontWeight: "600" }}
+                >
                   {newTransaction.moneda}
                 </Text>
               </TouchableOpacity>
@@ -171,33 +230,48 @@ export default function AddTransactionModal({
               >
                 Categoría
               </Text>
-              <View className="flex-row flex-wrap -m-1 mb-3" style={styles.categoriesWrap}>
-                {CATEGORIES.map((cat) => (
+              <View
+                className="flex-row flex-wrap -m-1 mb-3"
+                style={styles.categoriesWrap}
+              >
+                {sortedCategories.map((cat) => (
                   <TouchableOpacity
                     key={cat}
                     className={`m-1 px-3 py-2 rounded border ${
-                      newTransaction.categoria === cat ? chipSelectedBgBorder : chipUnselectedBgBorder
+                      newTransaction.categoria === cat
+                        ? chipSelectedBgBorder
+                        : chipUnselectedBgBorder
                     }`}
                     style={[
                       styles.chip,
                       {
                         backgroundColor:
-                          newTransaction.categoria === cat ? chipSelectedBg : chipInactiveBg,
+                          newTransaction.categoria === cat
+                            ? chipSelectedBg
+                            : chipInactiveBg,
                         borderColor:
-                          newTransaction.categoria === cat ? chipSelectedBorder : chipInactiveBorder,
+                          newTransaction.categoria === cat
+                            ? chipSelectedBorder
+                            : chipInactiveBorder,
                       },
                     ]}
-                    onPress={() => setNewTransaction({ ...newTransaction, categoria: cat })}
+                    onPress={() =>
+                      setNewTransaction({ ...newTransaction, categoria: cat })
+                    }
                   >
                     <Text
                       className={
-                        newTransaction.categoria === cat ? chipSelectedText : chipUnselectedText
+                        newTransaction.categoria === cat
+                          ? chipSelectedText
+                          : chipUnselectedText
                       }
                       style={[
                         styles.chipLabel,
                         {
                           color:
-                            newTransaction.categoria === cat ? "#FFFFFF" : chipInactiveText,
+                            newTransaction.categoria === cat
+                              ? "#FFFFFF"
+                              : chipInactiveText,
                         },
                       ]}
                     >
@@ -209,13 +283,26 @@ export default function AddTransactionModal({
             </>
           )}
 
-          <View className="flex-row justify-between mt-4" style={styles.footerRow}>
+          <View
+            className="flex-row justify-between mt-4"
+            style={styles.footerRow}
+          >
             <TouchableOpacity
               className={`${minorBtnBgClass} px-4 py-2 rounded`}
               onPress={onCancel}
-              style={[styles.secondaryButton, { backgroundColor: secondaryButtonBg }]}
+              style={[
+                styles.secondaryButton,
+                { backgroundColor: secondaryButtonBg },
+              ]}
             >
-              <Text style={[styles.secondaryButtonText, { color: darkMode ? "#F9FAFB" : "#111827" }]}>Cancelar</Text>
+              <Text
+                style={[
+                  styles.secondaryButtonText,
+                  { color: darkMode ? "#F9FAFB" : "#111827" },
+                ]}
+              >
+                Cancelar
+              </Text>
             </TouchableOpacity>
             <TouchableOpacity
               className={`${accentBtnClass} px-4 py-2 rounded`}

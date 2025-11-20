@@ -1,13 +1,47 @@
 import { Ionicons } from "@expo/vector-icons";
 import { openDatabaseAsync } from "expo-sqlite";
 import { StatusBar } from "expo-status-bar";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 // Arquitectura: constantes y utilidades extraídas para mejorar legibilidad (SRP/SOLID)
+import { Righteous_400Regular } from "@expo-google-fonts/righteous";
+import * as DocumentPicker from "expo-document-picker";
+import * as FileSystem from "expo-file-system/legacy";
+import { useFonts } from "expo-font";
+import * as Sharing from "expo-sharing";
 import {
-  MONTHS_SHORT,
-  WEEKDAY_LABELS,
+  Alert,
+  BackHandler,
+  Dimensions,
+  FlatList,
+  Image,
+  Modal,
+  Platform,
+  ScrollView,
+  Text,
+  TextInput,
+  ToastAndroid,
+  TouchableOpacity,
+  View,
+} from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { Circle, G, Path, Svg } from "react-native-svg";
+import AmountBucketsChart from "./src/components/charts/AmountBucketsChart";
+import CategoryTopList from "./src/components/charts/CategoryTopList";
+import DonutCategoriesChart from "./src/components/charts/DonutCategoriesChart";
+import HeatmapChart from "./src/components/charts/HeatmapChart";
+import LineEvolutionChart from "./src/components/charts/LineEvolutionChart";
+import AddTransactionModal from "./src/components/modals/AddTransactionModal";
+import CreateCreditModal from "./src/components/modals/CreateCreditModal";
+import DataModal from "./src/components/modals/DataModal";
+import MonthPickerModal from "./src/components/modals/MonthPickerModal";
+import SearchTransactionsModal from "./src/components/modals/SearchTransactionsModal";
+import TasaDelDiaModal from "./src/components/modals/TasaDelDiaModal";
+import TransactionActionsModal from "./src/components/modals/TransactionActionsModal";
+import {
   AMOUNT_BUCKETS,
+  MONTHS_SHORT,
   PIE_COLORS,
+  WEEKDAY_LABELS,
 } from "./src/constants/charts";
 import {
   COLOR_GASTOS,
@@ -16,61 +50,13 @@ import {
   COLOR_INGRESOS_ALT,
 } from "./src/constants/colors";
 import {
-  pad2,
-  formatYMD,
   formatYM,
-  startOfWeek,
+  formatYMD,
+  pad2,
   parseSearchDate,
+  startOfWeek,
 } from "./src/utils/date";
-import {
-  polarToCartesian,
-  arcPath,
-  arcStroke,
-  donutSegmentPath,
-} from "./src/utils/svgPaths";
-import {
-  ActivityIndicator,
-  Alert,
-  BackHandler,
-  Dimensions,
-  FlatList,
-  Modal,
-  Platform,
-  ScrollView,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  Image,
-  View,
-  ToastAndroid,
-} from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
-import {
-  Circle,
-  G,
-  Line,
-  Path,
-  Polyline,
-  Rect,
-  Svg,
-  Text as SvgText,
-} from "react-native-svg";
-import { useFonts } from "expo-font";
-import { Righteous_400Regular } from "@expo-google-fonts/righteous";
-import * as FileSystem from "expo-file-system/legacy";
-import * as DocumentPicker from "expo-document-picker";
-import * as Sharing from "expo-sharing";
-import LineEvolutionChart from "./src/components/charts/LineEvolutionChart";
-import DonutCategoriesChart from "./src/components/charts/DonutCategoriesChart";
-import CategoryTopList from "./src/components/charts/CategoryTopList";
-import AmountBucketsChart from "./src/components/charts/AmountBucketsChart";
-import HeatmapChart from "./src/components/charts/HeatmapChart";
-import TasaDelDiaModal from "./src/components/modals/TasaDelDiaModal";
-import DataModal from "./src/components/modals/DataModal";
-import CreateCreditModal from "./src/components/modals/CreateCreditModal";
-import AddTransactionModal from "./src/components/modals/AddTransactionModal";
-import SearchTransactionsModal from "./src/components/modals/SearchTransactionsModal";
-import MonthPickerModal from "./src/components/modals/MonthPickerModal";
+import { donutSegmentPath } from "./src/utils/svgPaths";
 
 // Utilidades de fecha importadas desde src/utils/date
 
@@ -174,6 +160,16 @@ export default function App() {
   const [searchMaxAmount, setSearchMaxAmount] = useState("");
   const [searchStartDate, setSearchStartDate] = useState("");
   const [searchEndDate, setSearchEndDate] = useState("");
+  const [showTxActionsModal, setShowTxActionsModal] = useState(false);
+  const [selectedTransaction, setSelectedTransaction] = useState(null);
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [editTransaction, setEditTransaction] = useState({
+    tipo: "Gasto",
+    descripcion: "",
+    monto: "",
+    moneda: "VES",
+    categoria: "COMIDA",
+  });
   const [chartPeriod, setChartPeriod] = useState("week");
   const [selectedLineIndex, setSelectedLineIndex] = useState(null);
   const [chartCategoryMode, setChartCategoryMode] = useState("gastos");
@@ -200,6 +196,94 @@ export default function App() {
       await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
     }
     return dir;
+  };
+
+  const actualizarTransaccion = async () => {
+    if (!editTransaction || !selectedTransaction) return;
+    if (
+      !editTransaction.descripcion ||
+      !editTransaction.monto ||
+      isNaN(parseFloat(editTransaction.monto))
+    ) {
+      Alert.alert("Error", "Por favor complete todos los campos correctamente");
+      return;
+    }
+    const monto = parseFloat(editTransaction.monto);
+    const rate = parseFloat(tasaDolar);
+    if (!Number.isFinite(rate) || rate <= 0) {
+      Alert.alert(
+        "Error",
+        "Debe establecer una tasa válida del día antes de guardar"
+      );
+      setShowTasaModal(true);
+      return;
+    }
+    let montoUsd = 0;
+    let montoVes = 0;
+    if (editTransaction.moneda === "USD") {
+      montoUsd = monto;
+      montoVes = monto * rate;
+    } else {
+      montoVes = monto;
+      montoUsd = monto / rate;
+    }
+    if (!db) return;
+    try {
+      if (
+        !Number.isFinite(montoUsd) ||
+        !Number.isFinite(montoVes) ||
+        !Number.isFinite(monto)
+      ) {
+        Alert.alert(
+          "Error",
+          "Los montos calculados no son válidos. Revise los datos e intente de nuevo."
+        );
+        return;
+      }
+      const categoriaParam =
+        editTransaction.tipo === "Ingreso"
+          ? null
+          : editTransaction.categoria || "SIN CATEGORIA";
+      await db.withTransactionAsync(async () => {
+        await db.runAsync(
+          "UPDATE transacciones SET tipo = ?, descripcion = ?, monto_original = ?, moneda_original = ?, monto_usd_registro = ?, monto_ves_registro = ?, categoria = ?, tasa_ves_a_usd = ? WHERE id = ?",
+          [
+            editTransaction.tipo,
+            editTransaction.descripcion,
+            monto,
+            editTransaction.moneda,
+            montoUsd,
+            montoVes,
+            categoriaParam,
+            rate,
+            selectedTransaction.id,
+          ]
+        );
+      });
+      setShowEditModal(false);
+      setSelectedTransaction(null);
+      await loadTransactions();
+      await loadCategoryTotals();
+    } catch (e) {
+      console.error("[DB actualizarTransaccion] error", e);
+    }
+  };
+
+  const deleteSelectedTransaction = async () => {
+    if (!db || !selectedTransaction) return;
+    try {
+      await db.withTransactionAsync(async () => {
+        await db.runAsync("DELETE FROM transacciones WHERE id = ?", [
+          selectedTransaction.id,
+        ]);
+      });
+      setShowTxActionsModal(false);
+      setSelectedTransaction(null);
+      await loadTransactions();
+      await loadCategoryTotals();
+    } catch (e) {
+      console.error("[DB deleteSelectedTransaction] error", e);
+    }
   };
 
   // parseSearchDate importado desde src/utils/date
@@ -2387,66 +2471,79 @@ export default function App() {
           }
           renderItem={({ item }) => (
             <View className={`px-4`}>
-              <View
-                className={`p-3 mb-2 rounded-lg shadow overflow-hidden ${cardBgClass}`}
-                style={{
-                  borderLeftWidth: 4,
-                  borderLeftColor: getCategoryColor(item.categoria, item.tipo),
+              <TouchableOpacity
+                activeOpacity={0.8}
+                onPress={() => {
+                  setSelectedTransaction(item);
+                  setShowTxActionsModal(true);
                 }}
               >
-                <View className="flex-row justify-between">
-                  <View className="flex-1 pr-2">
-                    <View className="flex-row items-center">
-                      <Ionicons
-                        name={getCategoryIcon(item.categoria, item.tipo)}
-                        size={16}
-                        color={getCategoryColor(item.categoria, item.tipo)}
-                      />
-                      <Text
-                        className={`font-medium ${textPrimary}`}
-                        style={{ marginLeft: 6 }}
-                      >
-                        {item.descripcion}
+                <View
+                  className={`p-3 mb-2 rounded-lg shadow overflow-hidden ${cardBgClass}`}
+                  style={{
+                    borderLeftWidth: 4,
+                    borderLeftColor: getCategoryColor(
+                      item.categoria,
+                      item.tipo
+                    ),
+                  }}
+                >
+                  <View className="flex-row justify-between">
+                    <View className="flex-1 pr-2">
+                      <View className="flex-row items-center">
+                        <Ionicons
+                          name={getCategoryIcon(item.categoria, item.tipo)}
+                          size={16}
+                          color={getCategoryColor(item.categoria, item.tipo)}
+                        />
+                        <Text
+                          className={`font-medium ${textPrimary}`}
+                          style={{ marginLeft: 6 }}
+                        >
+                          {item.descripcion}
+                        </Text>
+                      </View>
+                      <Text className={`${textMuted} text-sm`}>
+                        {formatearFecha(item.fecha)}
+                      </Text>
+                      <Text className={`${textMuted} text-xs`}>
+                        {item.categoria ??
+                          (item.tipo === "Ingreso"
+                            ? "INGRESO"
+                            : "SIN CATEGORIA")}
                       </Text>
                     </View>
-                    <Text className={`${textMuted} text-sm`}>
-                      {formatearFecha(item.fecha)}
-                    </Text>
-                    <Text className={`${textMuted} text-xs`}>
-                      {item.categoria ??
-                        (item.tipo === "Ingreso" ? "INGRESO" : "SIN CATEGORIA")}
-                    </Text>
-                  </View>
-                  <View className="items-end" style={{ width: "40%" }}>
-                    <Text
-                      className={`text-right ${
-                        item.tipo === "Ingreso"
-                          ? "text-green-600"
-                          : "text-red-600"
-                      }`}
-                    >
-                      {item.tipo === "Ingreso" ? "+" : "-"}{" "}
-                      {displayCurrency === "USD" ? "$" : "Bs."}{" "}
-                      {Number(
-                        displayCurrency === "USD"
-                          ? item.monto_usd_registro
-                          : item.monto_ves_registro
-                      ).toFixed(2)}
-                    </Text>
-                    <Text className="text-gray-500 text-xs text-right">
-                      {displayCurrency === "USD"
-                        ? `Bs. ${Number(item.monto_ves_registro).toFixed(2)}`
-                        : `$ ${Number(item.monto_usd_registro).toFixed(2)}`}
-                    </Text>
-                    {item.tasa_ves_a_usd != null && (
-                      <Text className="text-gray-500 text-xs text-right">
-                        Tasa: Bs. {parseFloat(item.tasa_ves_a_usd).toFixed(2)} /
-                        $1
+                    <View className="items-end" style={{ width: "40%" }}>
+                      <Text
+                        className={`text-right ${
+                          item.tipo === "Ingreso"
+                            ? "text-green-600"
+                            : "text-red-600"
+                        }`}
+                      >
+                        {item.tipo === "Ingreso" ? "+" : "-"}{" "}
+                        {displayCurrency === "USD" ? "$" : "Bs."}{" "}
+                        {Number(
+                          displayCurrency === "USD"
+                            ? item.monto_usd_registro
+                            : item.monto_ves_registro
+                        ).toFixed(2)}
                       </Text>
-                    )}
+                      <Text className="text-gray-500 text-xs text-right">
+                        {displayCurrency === "USD"
+                          ? `Bs. ${Number(item.monto_ves_registro).toFixed(2)}`
+                          : `$ ${Number(item.monto_usd_registro).toFixed(2)}`}
+                      </Text>
+                      {item.tasa_ves_a_usd != null && (
+                        <Text className="text-gray-500 text-xs text-right">
+                          Tasa: Bs. {parseFloat(item.tasa_ves_a_usd).toFixed(2)}{" "}
+                          / $1
+                        </Text>
+                      )}
+                    </View>
                   </View>
                 </View>
-              </View>
+              </TouchableOpacity>
             </View>
           )}
         />
@@ -3230,6 +3327,78 @@ export default function App() {
         chipUnselectedBgBorder={chipUnselectedBgBorder}
         chipSelectedText={chipSelectedText}
         chipUnselectedText={chipUnselectedText}
+      />
+      <AddTransactionModal
+        visible={showEditModal}
+        newTransaction={editTransaction}
+        setNewTransaction={setEditTransaction}
+        onCancel={() => setShowEditModal(false)}
+        onSave={actualizarTransaccion}
+        CATEGORIES={CATEGORIES}
+        darkMode={darkMode}
+        modalBgClass={modalBgClass}
+        textPrimary={textPrimary}
+        textMuted={textMuted}
+        inputBgClass={inputBgClass}
+        inputBorderClass={inputBorderClass}
+        inputTextClass={inputTextClass}
+        placeholderColor={placeholderColor}
+        smallBtnBgClass={smallBtnBgClass}
+        minorBtnBgClass={minorBtnBgClass}
+        accentBtnClass={accentBtnClass}
+        chipSelectedBgBorder={chipSelectedBgBorder}
+        chipUnselectedBgBorder={chipUnselectedBgBorder}
+        chipSelectedText={chipSelectedText}
+        chipUnselectedText={chipUnselectedText}
+        title="Editar Transacción"
+      />
+      <TransactionActionsModal
+        visible={showTxActionsModal}
+        onClose={() => setShowTxActionsModal(false)}
+        onEdit={() => {
+          const t = selectedTransaction;
+          if (!t) {
+            setShowTxActionsModal(false);
+            return;
+          }
+          setShowTxActionsModal(false);
+          setEditTransaction({
+            tipo: t.tipo,
+            descripcion: t.descripcion || "",
+            monto: String(t.monto_original ?? ""),
+            moneda: t.moneda_original || "USD",
+            categoria:
+              t.tipo === "Ingreso" ? null : t.categoria || "SIN CATEGORIA",
+          });
+          setShowEditModal(true);
+        }}
+        onDelete={() => {
+          const t = selectedTransaction;
+          if (!t) {
+            setShowTxActionsModal(false);
+            return;
+          }
+          Alert.alert(
+            "Eliminar transacción",
+            "¿Deseas eliminar esta transacción?",
+            [
+              { text: "Cancelar", style: "cancel" },
+              {
+                text: "Eliminar",
+                style: "destructive",
+                onPress: deleteSelectedTransaction,
+              },
+            ]
+          );
+        }}
+        transaction={selectedTransaction}
+        darkMode={darkMode}
+        modalBgClass={modalBgClass}
+        textPrimary={textPrimary}
+        textMuted={textMuted}
+        smallBtnBgClass={smallBtnBgClass}
+        minorBtnBgClass={minorBtnBgClass}
+        accentBtnClass={accentBtnClass}
       />
       <DataModal
         visible={showDataModal}
